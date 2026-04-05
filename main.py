@@ -1,3 +1,4 @@
+import os
 import telebot
 import yfinance as yf
 import threading
@@ -5,18 +6,25 @@ import time
 import logging
 
 # =========================
-# 🔧 إعدادات
+# 🔐 TOKEN من ENV
 # =========================
-TOKEN = "PUT_YOUR_TOKEN_HERE"
+TOKEN = os.environ.get("TOKEN")
+
+if not TOKEN:
+    raise Exception("❌ TOKEN is missing in ENV variables")
+
 bot = telebot.TeleBot(TOKEN)
 
+# =========================
+# 📊 إعدادات
+# =========================
 CHAT_ID = None
 watchlist = set(["AAPL", "TSLA", "NVDA", "AMD"])
 
 logging.basicConfig(level=logging.INFO)
 
 # =========================
-# 📊 تحليل السهم
+# 📈 تحليل السهم
 # =========================
 def analyze(symbol):
     try:
@@ -48,17 +56,12 @@ def scanner():
         try:
             if CHAT_ID:
                 for s in list(watchlist):
-                    try:
-                        result = analyze(s)
+                    result = analyze(s)
 
-                        if not result:
-                            continue
-
+                    if result:
                         price, change = result
 
-                        # فلترة الفرص
                         if change > 2:
-
                             msg = f"""
 🚀 فرصة محتملة
 
@@ -66,75 +69,54 @@ def scanner():
 💰 السعر: {price}
 📈 التغير: {change}%
 """
-
                             bot.send_message(CHAT_ID, msg)
-
-                    except Exception as e:
-                        logging.info(f"Error scanning {s}: {e}")
-                        continue
 
             time.sleep(60)
 
         except Exception as e:
-            logging.info(f"Scanner crash: {e}")
+            logging.info(f"Scanner error: {e}")
             time.sleep(10)
 
 # =========================
-# ▶️ تشغيل
+# ▶️ start
 # =========================
 @bot.message_handler(commands=['start'])
 def start(message):
     global CHAT_ID
     CHAT_ID = message.chat.id
 
-    bot.reply_to(message, "🔥 البوت شغال\nاكتب /help")
+    bot.reply_to(message, "🔥 البوت شغال الآن")
 
 # =========================
-# 📘 help
-# =========================
-@bot.message_handler(commands=['help'])
-def help_cmd(message):
-    bot.reply_to(message, """
-📘 الأوامر:
-
-/add SYMBOL → إضافة سهم
-/remove SYMBOL → حذف سهم
-/list → عرض القائمة
-""")
-
-# =========================
-# ➕ إضافة سهم
+# ➕ add
 # =========================
 @bot.message_handler(commands=['add'])
 def add(message):
     try:
-        s = message.text.split(" ")[1].upper()
-        watchlist.add(s)
-        bot.reply_to(message, f"✅ تمت إضافة {s}")
+        symbol = message.text.split()[1].upper()
+        watchlist.add(symbol)
+        bot.reply_to(message, f"✅ تمت إضافة {symbol}")
     except:
         bot.reply_to(message, "استخدم /add TSLA")
 
 # =========================
-# ➖ حذف سهم
+# ➖ remove
 # =========================
 @bot.message_handler(commands=['remove'])
 def remove(message):
     try:
-        s = message.text.split(" ")[1].upper()
-        watchlist.discard(s)
-        bot.reply_to(message, f"❌ تم حذف {s}")
+        symbol = message.text.split()[1].upper()
+        watchlist.discard(symbol)
+        bot.reply_to(message, f"❌ تم حذف {symbol}")
     except:
         bot.reply_to(message, "استخدم /remove TSLA")
 
 # =========================
-# 📋 عرض القائمة
+# 📋 list
 # =========================
 @bot.message_handler(commands=['list'])
 def list_cmd(message):
-    if not watchlist:
-        bot.reply_to(message, "القائمة فاضية")
-    else:
-        bot.reply_to(message, "📊 القائمة:\n" + "\n".join(watchlist))
+    bot.reply_to(message, "📊 الأسهم:\n" + "\n".join(watchlist))
 
 # =========================
 # 🚀 تشغيل السكّانر
@@ -142,12 +124,12 @@ def list_cmd(message):
 threading.Thread(target=scanner, daemon=True).start()
 
 # =========================
-# 🔁 تشغيل البوت (حماية من الكراش)
+# 🔁 تشغيل البوت
 # =========================
 while True:
     try:
         print("Bot running...")
         bot.infinity_polling(timeout=60, long_polling_timeout=60)
     except Exception as e:
-        print("Bot crashed, restarting:", e)
+        print("Restarting bot...", e)
         time.sleep(5)

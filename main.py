@@ -1,85 +1,138 @@
 import telebot
 import yfinance as yf
-import pandas as pd
 import time
 import threading
+import pytz
+import logging
+from datetime import datetime
 
+# =========================
+# 🔧 إعدادات أساسية
+# =========================
 TOKEN = "PUT_YOUR_BOT_TOKEN_HERE"
 bot = telebot.TeleBot(TOKEN)
 
 CHAT_ID = None
 
-# 📊 الأسهم الافتراضية
-WATCHLIST = set(["AAPL", "TSLA", "NVDA", "AMZN", "META", "AMD"])
-
-# 🔔 منع تكرار الإشعارات
+WATCHLIST = set(["AAPL", "TSLA", "NVDA", "AMZN", "META", "AMD", "SPY"])
 last_alerts = {}
 
+logging.basicConfig(level=logging.INFO)
+
 # =========================
-# 📈 تحليل السهم
+# 🕐 تحديد جلسة السوق
 # =========================
-def analyze_stock(symbol):
+def get_session():
     try:
-        data = yf.download(symbol, period="5d", interval="15m")
-        if data.empty:
+        tz = pytz.timezone("US/Eastern")
+        now = datetime.now(tz)
+        hour = now.hour
+
+        if 4 <= hour < 9:
+            return "PRE"
+        elif 9 <= hour < 16:
+            return "MARKET"
+        else:
+            return "AFTER"
+    except:
+        return "UNKNOWN"
+
+
+# =========================
+# 📊 تحليل السهم (محمي ضد الكراش)
+# =========================
+def analyze(symbol):
+    try:
+        data = yf.download(symbol, period="1d", interval="5m", prepost=True)
+
+        if data is None or data.empty or len(data) < 20:
             return None
 
         close = data["Close"]
         volume = data["Volume"]
 
+        # 🔥 حركة سعر آمنة
         change = (close.iloc[-1] - close.iloc[-5]) / close.iloc[-5] * 100
-        vol_spike = volume.iloc[-1] > volume.mean() * 1.5
+
+        # 📊 حجم التداول
+        vol_spike = volume.iloc[-1] > volume.mean() * 1.8
 
         score = 50
-        if change > 2:
-            score += 20
-        if change > 5:
-            score += 20
-        if vol_spike:
+
+        if change > 1:
             score += 15
+        if change > 3:
+            score += 20
+        if change > 7:
+            score += 25
+
+        if vol_spike:
+            score += 20
+
+        session = get_session()
 
         return {
             "symbol": symbol,
             "change": round(change, 2),
-            "score": score
+            "score": score,
+            "session": session
         }
 
-    except:
+    except Exception as e:
+        logging.info(f"Error analyzing {symbol}: {e}")
         return None
 
 
 # =========================
-# 🔥 المراقبة التلقائية
+# 🔥 المراقبة المستمرة (محمي)
 # =========================
 def scanner():
     global CHAT_ID
 
     while True:
-        if CHAT_ID:
-            for s in list(WATCHLIST):
-                res = analyze_stock(s)
+        try:
+            if CHAT_ID:
 
-                if res and res["score"] >= 80:
-                    if last_alerts.get(s) != "sent":
+                for s in list(WATCHLIST):
+                    try:
+                        res = analyze(s)
 
-                        msg = f"""
-🚨 BREAKOUT ALERT 🚨
+                        if not res:
+                            continue
+
+                        if res["score"] >= 75:
+
+                            key = f"{s}_{res['session']}"
+
+                            if last_alerts.get(key) != "sent":
+
+                                msg = f"""
+🚨 STOCK ALERT 🚨
 
 📊 السهم: {s}
+⏰ الجلسة: {res['session']}
+
 📈 التغير: {res['change']}%
 ⚡ القوة: {res['score']}/100
 
-💡 فرصة مضاربة محتملة
+💡 فرصة محتملة (Momentum / Scalping)
 """
 
-                        bot.send_message(CHAT_ID, msg)
-                        last_alerts[s] = "sent"
+                                bot.send_message(CHAT_ID, msg)
+                                last_alerts[key] = "sent"
 
-        time.sleep(60)
+                    except:
+                        continue
+
+            time.sleep(60)
+
+        except Exception as e:
+            logging.info(f"Scanner error: {e}")
+            time.sleep(10)
 
 
 # =========================
-# 👋 بدء البوت
+# ▶️ Start
 # =========================
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -87,34 +140,32 @@ def start(message):
     CHAT_ID = message.chat.id
 
     bot.send_message(message.chat.id,
-        "🔥 تم تشغيل بوت الأسهم\n\nاكتب /help لمعرفة الأوامر"
+        "🔥 Bot Started Successfully\nاكتب /help"
     )
 
 
 # =========================
-# 📘 المساعدة
+# 📘 Help
 # =========================
 @bot.message_handler(commands=['help'])
 def help_cmd(message):
     bot.send_message(message.chat.id, """
-📘 أوامر البوت:
+📘 الأوامر:
 
-/start - تشغيل البوت
-/help - شرح الأوامر
+/add SYMBOL → إضافة سهم
+/remove SYMBOL → حذف سهم
+/analyze SYMBOL → تحليل سريع
+/start → تشغيل البوت
 
-/add SYMBOL - إضافة سهم للمراقبة
-مثال: /add MTEN
+🔥 النظام:
+- Pre Market
+- Market
+- After Hours
 
-/remove SYMBOL - حذف سهم
-مثال: /remove TSLA
-
-/analyze SYMBOL - تحليل سريع
-مثال: /analyze AAPL
-
-💡 البوت يرسل إشعارات تلقائية عند:
-- Breakout قوي 💥
-- حركة سعر مفاجئة ⚡
-- زيادة حجم تداول 📊
+📊 إشارات:
+- Momentum ⚡
+- Breakout 💥
+- Volume Spike 📊
 """)
 
 
@@ -122,28 +173,26 @@ def help_cmd(message):
 # ➕ إضافة سهم
 # =========================
 @bot.message_handler(commands=['add'])
-def add_stock(message):
+def add(message):
     try:
-        symbol = message.text.split(" ")[1].upper()
-        WATCHLIST.add(symbol)
-
-        bot.send_message(message.chat.id, f"✅ تم إضافة {symbol} للمراقبة")
+        s = message.text.split(" ")[1].upper()
+        WATCHLIST.add(s)
+        bot.send_message(message.chat.id, f"✅ Added {s}")
     except:
-        bot.send_message(message.chat.id, "استخدم: /add MTEN")
+        bot.send_message(message.chat.id, "Use /add TSLA")
 
 
 # =========================
 # ➖ حذف سهم
 # =========================
 @bot.message_handler(commands=['remove'])
-def remove_stock(message):
+def remove(message):
     try:
-        symbol = message.text.split(" ")[1].upper()
-        WATCHLIST.discard(symbol)
-
-        bot.send_message(message.chat.id, f"❌ تم حذف {symbol}")
+        s = message.text.split(" ")[1].upper()
+        WATCHLIST.discard(s)
+        bot.send_message(message.chat.id, f"❌ Removed {s}")
     except:
-        bot.send_message(message.chat.id, "استخدم: /remove MTEN")
+        bot.send_message(message.chat.id, "Use /remove TSLA")
 
 
 # =========================
@@ -152,28 +201,29 @@ def remove_stock(message):
 @bot.message_handler(commands=['analyze'])
 def analyze_cmd(message):
     try:
-        symbol = message.text.split(" ")[1].upper()
-        res = analyze_stock(symbol)
+        s = message.text.split(" ")[1].upper()
+        res = analyze(s)
 
         if not res:
-            bot.send_message(message.chat.id, "ما قدرت أحلل السهم")
+            bot.send_message(message.chat.id, "No data available")
             return
 
         bot.send_message(message.chat.id, f"""
-📊 تحليل {symbol}
+📊 {s}
 
-📈 التغير: {res['change']}%
-⚡ القوة: {res['score']}/100
+📈 Change: {res['change']}%
+⚡ Score: {res['score']}/100
+⏰ Session: {res['session']}
 """)
 
     except:
-        bot.send_message(message.chat.id, "استخدم: /analyze AAPL")
+        bot.send_message(message.chat.id, "Use /analyze AAPL")
 
 
 # =========================
-# 🚀 تشغيل المراقبة
+# 🚀 تشغيل السكّانر
 # =========================
 threading.Thread(target=scanner, daemon=True).start()
 
-print("Bot is running...")
-bot.polling()
+print("Bot Running...")
+bot.infinity_polling()

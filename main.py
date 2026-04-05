@@ -2,87 +2,152 @@ import telebot
 import yfinance as yf
 import threading
 import time
-import datetime
+import logging
 
-TOKEN = "PUT_YOUR_BOT_TOKEN_HERE"
+# =========================
+# 🔧 إعدادات
+# =========================
+TOKEN = "PUT_YOUR_TOKEN_HERE"
 bot = telebot.TeleBot(TOKEN)
 
-# قائمة متابعة للإشعارات
-watchlist = []
+CHAT_ID = None
+watchlist = set(["AAPL", "TSLA", "NVDA", "AMD"])
 
-# ---------------- HELP ----------------
-@bot.message_handler(commands=['help'])
-def help_message(message):
-    bot.reply_to(message, """
-📊 أوامر البوت:
+logging.basicConfig(level=logging.INFO)
 
-/stock SYMBOL
-تحليل سهم (مثال: /stock AAPL)
-
-/add SYMBOL
-إضافة سهم للإشعارات
-
-/list
-عرض الأسهم المتابعة
-
-/remove SYMBOL
-حذف سهم من القائمة
-
-/help
-عرض الأوامر
-""")
-
-# ---------------- STOCK ANALYSIS ----------------
-@bot.message_handler(commands=['stock'])
-def stock_analysis(message):
+# =========================
+# 📊 تحليل السهم
+# =========================
+def analyze(symbol):
     try:
-        symbol = message.text.split()[1].upper()
+        df = yf.download(symbol, period="1d", interval="5m")
 
-        data = yf.download(symbol, period="5d", interval="1h")
+        if df is None or df.empty or len(df) < 10:
+            return None
 
-        if data.empty:
-            bot.reply_to(message, "ما قدرت أجيب بيانات السهم ❌")
-            return
+        close = df["Close"]
 
-        price = float(data['Close'].iloc[-1])
-        high = float(data['High'].max())
-        low = float(data['Low'].min())
+        price = float(close.iloc[-1])
+        old_price = float(close.iloc[-5])
 
-        change = ((price - data['Close'].iloc[0]) / data['Close'].iloc[0]) * 100
+        change = ((price - old_price) / old_price) * 100
 
-        signal = "🟢 فرصة صعود" if change > 2 else "🔴 ضعيف" if change < -2 else "🟡 مراقبة"
-
-        bot.reply_to(message,
-            f"""
-📊 تحليل: {symbol}
-
-💰 السعر الحالي: {price:.2f}
-📈 أعلى سعر: {high:.2f}
-📉 أقل سعر: {low:.2f}
-
-📊 التغير: {change:.2f}%
-
-📌 التقييم: {signal}
-""")
+        return round(price, 2), round(change, 2)
 
     except Exception as e:
-        bot.reply_to(message, f"خطأ في التحليل: {e}")
+        logging.info(f"Error analyzing {symbol}: {e}")
+        return None
 
-# ---------------- ADD WATCH ----------------
+# =========================
+# 🔥 سكّانر
+# =========================
+def scanner():
+    global CHAT_ID
+
+    while True:
+        try:
+            if CHAT_ID:
+                for s in list(watchlist):
+                    try:
+                        result = analyze(s)
+
+                        if not result:
+                            continue
+
+                        price, change = result
+
+                        # فلترة الفرص
+                        if change > 2:
+
+                            msg = f"""
+🚀 فرصة محتملة
+
+📊 {s}
+💰 السعر: {price}
+📈 التغير: {change}%
+"""
+
+                            bot.send_message(CHAT_ID, msg)
+
+                    except Exception as e:
+                        logging.info(f"Error scanning {s}: {e}")
+                        continue
+
+            time.sleep(60)
+
+        except Exception as e:
+            logging.info(f"Scanner crash: {e}")
+            time.sleep(10)
+
+# =========================
+# ▶️ تشغيل
+# =========================
+@bot.message_handler(commands=['start'])
+def start(message):
+    global CHAT_ID
+    CHAT_ID = message.chat.id
+
+    bot.reply_to(message, "🔥 البوت شغال\nاكتب /help")
+
+# =========================
+# 📘 help
+# =========================
+@bot.message_handler(commands=['help'])
+def help_cmd(message):
+    bot.reply_to(message, """
+📘 الأوامر:
+
+/add SYMBOL → إضافة سهم
+/remove SYMBOL → حذف سهم
+/list → عرض القائمة
+""")
+
+# =========================
+# ➕ إضافة سهم
+# =========================
 @bot.message_handler(commands=['add'])
-def add_stock(message):
+def add(message):
     try:
-        symbol = message.text.split()[1].upper()
-        if symbol not in watchlist:
-            watchlist.append(symbol)
-        bot.reply_to(message, f"تمت إضافة {symbol} 🔔")
+        s = message.text.split(" ")[1].upper()
+        watchlist.add(s)
+        bot.reply_to(message, f"✅ تمت إضافة {s}")
     except:
-        bot.reply_to(message, "استخدم /add AAPL")
+        bot.reply_to(message, "استخدم /add TSLA")
 
-# ---------------- LIST ----------------
+# =========================
+# ➖ حذف سهم
+# =========================
+@bot.message_handler(commands=['remove'])
+def remove(message):
+    try:
+        s = message.text.split(" ")[1].upper()
+        watchlist.discard(s)
+        bot.reply_to(message, f"❌ تم حذف {s}")
+    except:
+        bot.reply_to(message, "استخدم /remove TSLA")
+
+# =========================
+# 📋 عرض القائمة
+# =========================
 @bot.message_handler(commands=['list'])
-def list_stocks(message):
+def list_cmd(message):
     if not watchlist:
         bot.reply_to(message, "القائمة فاضية")
     else:
-        bot.reply_to(message, "📌
+        bot.reply_to(message, "📊 القائمة:\n" + "\n".join(watchlist))
+
+# =========================
+# 🚀 تشغيل السكّانر
+# =========================
+threading.Thread(target=scanner, daemon=True).start()
+
+# =========================
+# 🔁 تشغيل البوت (حماية من الكراش)
+# =========================
+while True:
+    try:
+        print("Bot running...")
+        bot.infinity_polling(timeout=60, long_polling_timeout=60)
+    except Exception as e:
+        print("Bot crashed, restarting:", e)
+        time.sleep(5)

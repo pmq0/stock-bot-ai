@@ -16,24 +16,24 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN)
 
 # =========================
-# 📊 إعدادات
+# ⚙️ إعدادات
 # =========================
 CHAT_ID = None
-watchlist = set(["AAPL", "TSLA", "NVDA", "AMD"])
+watchlist = {"AAPL", "TSLA", "NVDA", "AMD"}
 
 logging.basicConfig(level=logging.INFO)
 
 # =========================
-# 📈 تحليل السهم
+# 📊 تحليل السهم (FIXED 100%)
 # =========================
 def analyze(symbol):
     try:
-        df = yf.download(symbol, period="1d", interval="5m")
+        df = yf.download(symbol, period="1d", interval="5m", progress=False)
 
         if df is None or df.empty or len(df) < 10:
             return None
 
-        close = df["Close"]
+        close = df["Close"].dropna()
 
         price = float(close.iloc[-1])
         old_price = float(close.iloc[-5])
@@ -47,7 +47,7 @@ def analyze(symbol):
         return None
 
 # =========================
-# 🔥 سكّانر
+# 🔥 Scanner
 # =========================
 def scanner():
     global CHAT_ID
@@ -84,8 +84,7 @@ def scanner():
 def start(message):
     global CHAT_ID
     CHAT_ID = message.chat.id
-
-    bot.reply_to(message, "🔥 البوت شغال الآن")
+    bot.reply_to(message, "🔥 البوت شغال")
 
 # =========================
 # ➕ add
@@ -116,7 +115,7 @@ def remove(message):
 # =========================
 @bot.message_handler(commands=['list'])
 def list_cmd(message):
-    bot.reply_to(message, "📊 الأسهم:\n" + "\n".join(watchlist))
+    bot.reply_to(message, "📊 القائمة:\n" + "\n".join(watchlist))
 
 # =========================
 # 🚀 تشغيل السكّانر
@@ -124,12 +123,12 @@ def list_cmd(message):
 threading.Thread(target=scanner, daemon=True).start()
 
 # =========================
-# 🔁 تشغيل البوت
+# 🔁 تشغيل البوت (Stable)
 # =========================
 while True:
     try:
         print("Bot running...")
-        bot.infinity_polling(timeout=60, long_polling_timeout=60)
+        bot.infinity_polling(skip_pending=True)
     except Exception as e:
         print("Restarting bot...", e)
         time.sleep(5)

@@ -1,161 +1,107 @@
 import yfinance as yf
-import asyncio
+import pandas as pd
+import numpy as np
+import requests
+import time
 import os
-from telegram import Bot
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-bot = Bot(token=TOKEN)
-
-# 💣 Market Universe (واسع + مضاربي)
-MARKET = [
-    # Big movers
-    "AAPL","TSLA","NVDA","AMZN","META","MSFT",
-
-    # Momentum
-    "GME","AMC","BB","PLTR","SOFI","RIOT","MARA",
-
-    # Penny / high volatility
-    "FFIE","NKLA","MULN","SNDL","ATER","BBIG","CEI","COSM","XELA",
-
-    # Biotech pumps
-    "VXRT","INO","OCGN","TNXP"
-]
-
-tracked = {}
+# ---------------- TELEGRAM ----------------
+def send(msg):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
 
-# 🧠 حساب قوة الصفقة
-def score_trade(volume_spike, momentum, breakout, trend):
-    score = 0
+# ---------------- STOCK LIST (LIVE SCAN) ----------------
+def get_movers():
+    # قائمة بسيطة قابلة للتطوير (تقدر نطورها لاحقًا لـ API حقيقي)
+    return [
+        "AAPL","TSLA","NVDA","AMD","AMZN","META","PLTR",
+        "NIO","SOFI","F","AMD","INTC","GOOGL","MSFT",
+        "SPY","QQQ","BABA","RIOT","MARA","CLSK"
+    ]
 
-    if volume_spike: score += 35
-    if momentum: score += 25
-    if breakout: score += 25
-    if trend: score += 15
 
-    return score
+# ---------------- INDICATORS ----------------
+def rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
 
 def analyze(symbol):
     try:
-        df = yf.download(symbol, period="2d", interval="5m", progress=False)
-
-        if df.empty or len(df) < 40:
+        df = yf.download(symbol, period="5d", interval="15m")
+        if df.empty:
             return None
 
-        close = df["Close"]
-        volume = df["Volume"]
+        price = df['Close'].iloc[-1]
+        volume = df['Volume'].iloc[-1]
+        avg_volume = df['Volume'].mean()
 
-        price = close.iloc[-1]
-
-        # فلتر أساسي
-        if price < 0.2 or price > 20:
+        if price > 10:
             return None
 
-        avg_vol = volume[:-1].mean()
-        curr_vol = volume.iloc[-1]
+        # Indicators
+        df['RSI'] = rsi(df['Close'])
+        rsi_val = df['RSI'].iloc[-1]
 
-        resistance = close.tail(25).max()
-        support = close.tail(25).min()
+        resistance = df['High'].rolling(20).max().iloc[-1]
 
-        volume_spike = curr_vol > avg_vol * 3
-        breakout = price >= resistance * 0.985
-        momentum = close.iloc[-1] > close.iloc[-2] > close.iloc[-3]
-        trend = close.iloc[-1] > close.mean()
+        breakout = price >= resistance * 0.98
+        volume_spike = volume > avg_volume * 1.5
+        momentum = rsi_val > 55
 
-        score = score_trade(volume_spike, momentum, breakout, trend)
+        if breakout and volume_spike and momentum:
+            entry = price
+            tp1 = round(entry * 1.12, 3)
+            tp2 = round(entry * 1.25, 3)
+            sl = round(entry * 0.92, 3)
 
-        if score >= 70:
             return {
                 "symbol": symbol,
-                "price": price,
-                "resistance": resistance,
-                "support": support,
-                "score": score
+                "entry": entry,
+                "tp1": tp1,
+                "tp2": tp2,
+                "sl": sl
             }
 
     except:
         return None
 
-
-def calc_targets(price, resistance, support):
-    entry = resistance * 1.01
-
-    tp1 = entry * 1.06
-    tp2 = entry * 1.12
-    tp3 = entry * 1.25
-
-    sl = support * 0.98
-
-    return entry, tp1, tp2, tp3, sl
+    return None
 
 
-async def scanner():
-    print("🔥 FINAL PRO SCANNER RUNNING...")
+# ---------------- SCANNER LOOP ----------------
+def run():
+    send("🚀 البوت بدأ المسح قبل الافتتاح...")
 
     while True:
-        for symbol in MARKET:
-            data = analyze(symbol)
+        stocks = get_movers()
 
-            if not data:
-                continue
+        for s in stocks:
+            signal = analyze(s)
 
-            entry, tp1, tp2, tp3, sl = calc_targets(
-                data["price"],
-                data["resistance"],
-                data["support"]
-            )
-
-            prev = tracked.get(symbol)
-
-            # 🚀 فرصة جديدة
-            if not prev:
-                tracked[symbol] = {"last": data["price"]}
-
+            if signal:
                 msg = f"""
-🚀 HIGH PROBABILITY BREAKOUT
+🚀 فرصة مضاربة محتملة
 
-📊 {symbol}
-💰 Price: {data['price']:.2f}
+📊 السهم: {signal['symbol']}
+💰 دخول: {signal['entry']}
+🎯 TP1: {signal['tp1']}
+🎯 TP2: {signal['tp2']}
+🛑 SL: {signal['sl']}
 
-📊 Score: {data['score']}/100 🔥
-
-🎯 Entry: {entry:.2f}
-
-🎯 TP1: {tp1:.2f}
-🎯 TP2: {tp2:.2f}
-🎯 TP3: {tp3:.2f}
-
-🛑 SL: {sl:.2f}
-
-⚡ WAIT CONFIRMATION BREAKOUT
+⚡ سكالبينج سريع
 """
-                await bot.send_message(chat_id=CHAT_ID, text=msg)
+                send(msg)
 
-            # 🔁 متابعة الزخم
-            else:
-                last = prev["last"]
-
-                if data["price"] > last * 1.07:
-
-                    tracked[symbol]["last"] = data["price"]
-
-                    msg = f"""
-⚡ MOMENTUM CONTINUATION
-
-📊 {symbol}
-💰 New Price: {data['price']:.2f}
-
-🔥 Strong continuation detected
-📈 Second entry zone forming
-
-📊 Score still active: {data['score']}/100
-"""
-                    await bot.send_message(chat_id=CHAT_ID, text=msg)
-
-        await asyncio.sleep(40)
+        time.sleep(300)  # كل 5 دقائق
 
 
-asyncio.run(scanner())
+if __name__ == "__main__":
+    run()

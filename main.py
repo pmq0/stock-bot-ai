@@ -18,7 +18,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 POLYGON_API = os.getenv("POLYGON_API")
 
 if not TOKEN or not CHAT_ID or not POLYGON_API:
-    raise ValueError("Missing required environment variables: TOKEN, CHAT_ID, POLYGON_API")
+    raise ValueError("Missing required environment variables")
 
 CAPITAL = 10000.0
 RISK_PER_TRADE = 0.02
@@ -39,10 +39,10 @@ logger = logging.getLogger()
 app = Flask(__name__)
 bot = telebot.TeleBot(TOKEN)
 
-# ThreadPoolExecutor for /scan command (max 2 concurrent tasks)
+# ThreadPoolExecutor for /scan command
 executor = ThreadPoolExecutor(max_workers=2)
 
-# ================= STATE MANAGEMENT (with lock) =================
+# ================= STATE MANAGEMENT =================
 state_lock = threading.RLock()
 state = {
     "open_trades": {},
@@ -85,7 +85,7 @@ def reset_daily_loss_if_needed():
             state["last_reset"] = today
             save_state()
 
-# ================= RATE LIMIT (centralized) =================
+# ================= RATE LIMIT =================
 _last_api_call = 0
 _api_lock = threading.Lock()
 
@@ -98,9 +98,8 @@ def rate_limit():
             time.sleep(wait)
         _last_api_call = time.time()
 
-# ================= DATA ENGINE (Polygon only, no yfinance) =================
+# ================= DATA ENGINE =================
 def fetch_polygon(symbol):
-    """Fetch data from Polygon, return DataFrame with indicators or None"""
     rate_limit()
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
@@ -118,7 +117,7 @@ def fetch_polygon(symbol):
         logger.error(f"Fetch error {symbol}: {e}")
         return None
 
-# ================= INDICATORS (computed once) =================
+# ================= INDICATORS =================
 def compute_indicators(df):
     df = df.copy()
     df["ema9"] = df["close"].ewm(9).mean()
@@ -129,7 +128,6 @@ def compute_indicators(df):
     rs = gain / (loss + 1e-9)
     df["rsi"] = 100 - (100/(1+rs))
     df["atr"] = (df["high"] - df["low"]).rolling(14).mean()
-    # OBV manual
     obv = [0]
     for i in range(1, len(df)):
         if df["close"].iloc[i] > df["close"].iloc[i-1]:
@@ -190,7 +188,6 @@ def can_trade(price, atr):
     size = int(risk_amount / stop_distance)
     if size < 1:
         return False, 0
-    # Max exposure 20% of capital
     if size * price > CAPITAL * 0.2:
         size = int(CAPITAL * 0.2 / price)
         if size < 1:
@@ -249,7 +246,7 @@ def is_market_open():
     close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
     return open_time <= now <= close_time
 
-# ================= CACHE & SCAN (no duplicate API calls) =================
+# ================= CACHE & SCAN =================
 data_cache = {}
 
 def build_cache(symbols):
@@ -294,19 +291,14 @@ def scan_symbols(symbols):
         open_trade(symbol, price, atr, score_val, size)
         mark_seen(symbol)
 
-# ================= TELEGRAM LAYER (fast, no yfinance) =================
+# ================= TELEGRAM FUNCTIONS =================
 def send_telegram(msg):
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"},
-            timeout=10
-        )
+        bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='HTML')
     except Exception as e:
         logger.error(f"Telegram send error: {e}")
 
 def generate_simple_analysis(symbol):
-    """Fast analysis using Polygon only (no yfinance)"""
     df = fetch_polygon(symbol)
     if df is None or len(df) < 30:
         return f"⚠️ لا توجد بيانات كافية للسهم {symbol}. تأكد من الرمز."
@@ -316,33 +308,28 @@ def generate_simple_analysis(symbol):
     volume = df["volume"].iloc[-1]
     avg_volume = df["vol_ma"].iloc[-1]
     rsi = df["rsi"].iloc[-1]
-    analysis = f"""
+    return f"""
 📊 <b>تحليل سهم {symbol}</b>
 💰 السعر الحالي: ${price:.2f}
 📊 الحجم: {volume:,.0f}
-⚖️ متوسط الحجم (20): {avg_volume:,.0f}
-🎢 ATR (التقلب): {atr:.2f}
-⚡️ RSI (الزخم): {rsi:.2f}
+⚖️ متوسط الحجم: {avg_volume:,.0f}
+🎢 ATR: {atr:.2f}
+⚡️ RSI: {rsi:.2f}
 🧠 النتيجة: {score_val}/100
-
-<i>تم التحليل باستخدام بيانات Polygon API.</i>
 """
-    return analysis
 
 # ================= TELEGRAM COMMANDS =================
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     welcome = """
-🚀 <b>بوت التداول الآلي v14 (Production-Ready)</b>
+🚀 <b>بوت التداول الآلي v14</b>
 
 <b>الأوامر المتاحة:</b>
-/scan <رمز> – تحليل فني سريع للسهم
-/status – حالة البوت (الصفقات، الأداء)
+/scan &lt;رمز&gt; – تحليل فني
+/status – حالة البوت
 /positions – الصفقات المفتوحة
 /performance – أداء كل رمز
-/close <رمز> – إغلاق صفقة يدوياً
-
-<b>النظام يعمل الآن بأمان واستقرار.</b>
+/close &lt;رمز&gt; – إغلاق صفقة
 """
     bot.reply_to(message, welcome, parse_mode='HTML')
 
@@ -362,10 +349,10 @@ def cmd_scan(message):
         try:
             future.result(timeout=15)
         except TimeoutError:
-            bot.edit_message_text(chat_id=message.chat.id, message_id=processing_msg.message_id, text="⚠️ استغرق التحليل وقتاً طويلاً، حاول مجدداً.")
+            bot.edit_message_text(chat_id=message.chat.id, message_id=processing_msg.message_id, text="⚠️ استغرق التحليل وقتاً طويلاً")
     except Exception as e:
-        logger.error(f"Scan command error: {e}")
-        bot.reply_to(message, "❌ حدث خطأ، حاول مرة أخرى.")
+        logger.error(f"Scan error: {e}")
+        bot.reply_to(message, "❌ حدث خطأ")
 
 @bot.message_handler(commands=['status'])
 def cmd_status(message):
@@ -382,68 +369,52 @@ def cmd_status(message):
 ✅ فوز: {total_wins}
 ❌ خسارة: {total_losses}
 📈 نسبة الفوز: {winrate:.1f}%
-📉 خسارة اليوم: ${state['daily_loss']:.2f} / ${DAILY_LOSS_LIMIT}
-⚙️ الأوزان: {state['weights']}
+📉 خسارة اليوم: ${state['daily_loss']:.2f}
 """
-    send_telegram(msg)
+    bot.reply_to(message, msg, parse_mode='HTML')
 
 @bot.message_handler(commands=['positions'])
 def cmd_positions(message):
     with state_lock:
         if not state["open_trades"]:
-            send_telegram("لا توجد صفقات مفتوحة.")
+            bot.reply_to(message, "لا توجد صفقات مفتوحة")
             return
         msg = "<b>الصفقات المفتوحة</b>\n"
         for sym, t in state["open_trades"].items():
-            msg += f"\n🔹 {sym} | دخول ${t['entry']:.2f} | TP ${t['tp']:.2f} | SL ${t['sl']:.2f} | كمية {t['size']}"
-    send_telegram(msg)
+            msg += f"\n🔹 {sym} | دخول ${t['entry']:.2f} | TP ${t['tp']:.2f} | SL ${t['sl']:.2f}"
+    bot.reply_to(message, msg, parse_mode='HTML')
 
 @bot.message_handler(commands=['performance'])
 def cmd_performance(message):
     with state_lock:
         if not state["performance"]:
-            send_telegram("لا توجد صفقات مكتملة بعد.")
+            bot.reply_to(message, "لا توجد صفقات مكتملة")
             return
         msg = "<b>أداء كل رمز</b>\n"
         for sym, p in state["performance"].items():
             total = p["wins"] + p["losses"]
             wr = (p["wins"] / total * 100) if total else 0
-            msg += f"\n{sym}: {p['wins']} فوز / {p['losses']} خسارة ({wr:.1f}%)"
-    send_telegram(msg)
+            msg += f"\n{sym}: {p['wins']}W / {p['losses']}L ({wr:.1f}%)"
+    bot.reply_to(message, msg, parse_mode='HTML')
 
 @bot.message_handler(commands=['close'])
 def cmd_close(message):
     parts = message.text.split()
     if len(parts) != 2:
-        send_telegram("استخدم: /close <رمز>")
+        bot.reply_to(message, "استخدم: /close <رمز>")
         return
     symbol = parts[1].upper()
     with state_lock:
         if symbol not in state["open_trades"]:
-            send_telegram(f"لا توجد صفقة مفتوحة لـ {symbol}")
+            bot.reply_to(message, f"لا توجد صفقة لـ {symbol}")
             return
     df = fetch_polygon(symbol)
     if df is None:
-        send_telegram(f"لا يمكن جلب السعر لـ {symbol}")
+        bot.reply_to(message, f"لا يمكن جلب سعر {symbol}")
         return
     price = df["close"].iloc[-1]
     close_trade(symbol, price, win=False)
-    send_telegram(f"تم إغلاق {symbol} يدوياً عند ${price:.2f}")
-
-# ================= WEBHOOK (webhook only, no polling) =================
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    try:
-        update = telebot.types.Update.de_json(request.data.decode("utf-8"))
-        bot.process_new_updates([update])
-        return "ok", 200
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return "error", 500
-
-@app.route("/")
-def home():
-    return "AI Trading Bot v14 is running"
+    bot.reply_to(message, f"تم إغلاق {symbol} عند ${price:.2f}")
 
 # ================= BACKGROUND SCANNER =================
 def background_scanner():
@@ -459,21 +430,41 @@ def background_scanner():
             logger.error(f"Scanner error: {e}")
             time.sleep(60)
 
+# ================= WEBHOOK ENDPOINT =================
+@app.route("/", methods=['GET'])
+def home():
+    return "Bot is running"
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    try:
+        update = telebot.types.Update.de_json(request.data.decode("utf-8"))
+        bot.process_new_updates([update])
+        return "ok", 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return "error", 500
+
 # ================= START =================
 if __name__ == "__main__":
     load_state()
     reset_daily_loss_if_needed()
-    # Start background scanner
-    threading.Thread(target=background_scanner, daemon=True).start()
-    # Setup webhook for Railway
-    railway_url = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
-    if railway_url:
-        webhook_url = f"https://{railway_url}/webhook"
-        bot.remove_webhook()
-        bot.set_webhook(url=webhook_url)
-        logger.info(f"Webhook set to {webhook_url}")
-    else:
-        logger.warning("RAILWAY_PUBLIC_DOMAIN not set; webhook will not work")
-    # Run Flask server
+    
+    # بدء البوت بطريقة Polling
+    def run_bot():
+        logger.info("Starting bot polling...")
+        bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    
+    polling_thread = threading.Thread(target=run_bot, daemon=True)
+    polling_thread.start()
+    
+    # بدء الماسح الضوئي
+    scanner_thread = threading.Thread(target=background_scanner, daemon=True)
+    scanner_thread.start()
+    
+    # إرسال رسالة بدء التشغيل
+    send_telegram("✅ بوت التداول v14 شغال الآن!")
+    
+    # تشغيل Flask
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)

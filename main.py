@@ -24,6 +24,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")  # ضع مفتاحك في Railway Variables
 
 if not TELEGRAM_TOKEN or not CHAT_ID or not FINNHUB_API_KEY:
+    
 raise ValueError("Missing required environment variables")
 
 CAPITAL = 10000.0

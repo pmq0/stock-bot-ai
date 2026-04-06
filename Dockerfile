@@ -1,6 +1,10 @@
 FROM python:3.11-slim
+
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+# تثبيت المكتبات يدوياً لضمان عدم حدوث خطأ
+RUN pip install --no-cache-dir requests pyTelegramBotAPI numpy pandas pytz
+
 COPY main.py .
+
 CMD ["python", "main.py"]

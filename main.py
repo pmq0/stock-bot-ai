@@ -64,6 +64,7 @@ state = {
     },
     "seen_signals": {},
     "halted_alerts": {},
+    "last_accumulation": {},  # 🔥 NEW: لمنع تكرار تنبيهات التجميع
     "daily_loss": 0.0,
     "last_reset": None
 }
@@ -211,7 +212,7 @@ def pre_breakout_detection(df):
     volume_surge = df['volume'].iloc[-3:].mean() > df['volume'].rolling(20).mean().iloc[-1] * 1.5
     return is_squeezing and approaching and volume_surge
 
-# ================= TRADING HALTS (مع السعر والوقت) =================
+# ================= TRADING HALTS =================
 def check_trading_halt(symbol):
     try:
         rss_url = "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts"
@@ -227,17 +228,13 @@ def check_trading_halt(symbol):
                 if symbol in title or symbol in description:
                     price_match = re.search(r'PauseThresholdPrice:\s*\$?([0-9]+\.[0-9]+)', description)
                     halt_price = price_match.group(1) if price_match else "N/A"
-                    
                     time_match = re.search(r'(\d{1,2}:\d{2}:\d{2})\s*ET', description)
                     halt_time = time_match.group(1) if time_match else "N/A"
-                    
                     reason_match = re.search(r'Reason:\s*(.+?)(?:\.|$)', description)
                     reason = reason_match.group(1) if reason_match else "Trading Pause"
-                    
                     return True, datetime.now().strftime('%Y-%m-%d'), halt_time, reason, halt_price
     except Exception as e:
         logger.error(f"Error checking halt for {symbol}: {e}")
-    
     return False, None, None, None, None
 
 # ================= SIGNAL CONTROL =================
@@ -265,6 +262,28 @@ def is_halt_alerted(symbol):
 def mark_halt_alerted(symbol):
     with state_lock:
         state["halted_alerts"][symbol] = time.time()
+        save_state()
+
+# ================= ACCUMULATION ALERT CONTROL (NEW) =================
+def should_send_accumulation_alert(symbol, new_score):
+    """تتحقق إذا كان يجب إرسال تنبيه التجميع (يمنع التكرار بنسبة 10%)"""
+    with state_lock:
+        last = state["last_accumulation"].get(symbol)
+        if not last:
+            return True
+        old_score = last.get("score", 0)
+        # إذا تغيرت النسبة بـ 10% على الأقل، أرسل
+        if abs(new_score - old_score) >= 10:
+            return True
+        # إذا مر أكثر من 4 ساعات على آخر إرسال، أرسل (تحديث دوري)
+        if time.time() - last.get("time", 0) > 4 * 3600:
+            return True
+        return False
+
+def update_accumulation_alert(symbol, new_score):
+    """تحديث آخر تنبيه تم إرساله"""
+    with state_lock:
+        state["last_accumulation"][symbol] = {"score": new_score, "time": time.time()}
         save_state()
 
 # ================= MARKET HOURS =================
@@ -316,7 +335,6 @@ def can_trade(price, atr):
 def generate_and_send_chart(symbol, df, entry, tp, sl, is_penny=False, is_accumulating=False, session=""):
     try:
         df_plot = df.tail(60).copy()
-        
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
         
         ax1.plot(df_plot.index, df_plot['close'], 'cyan', linewidth=1.5, label='Price')
@@ -350,13 +368,11 @@ def generate_and_send_chart(symbol, df, entry, tp, sl, is_penny=False, is_accumu
         ax2.tick_params(colors='white')
         
         plt.tight_layout()
-        
         buf = io.BytesIO()
         plt.savefig(buf, format='png', dpi=100, facecolor='#1a1a2e')
         buf.seek(0)
         
-        caption = f"📊 **{symbol} - Technical Analysis**\n"
-        caption += f"💰 Entry: ${entry:.2f} | 🎯 TP: ${tp:.2f} | 🛑 SL: ${sl:.2f}\n"
+        caption = f"📊 **{symbol} - Technical Analysis**\n💰 Entry: ${entry:.2f} | 🎯 TP: ${tp:.2f} | 🛑 SL: ${sl:.2f}\n"
         if is_penny:
             caption += "🔥 **PENNY STOCK ALERT** 🔥\n"
         if is_accumulating:
@@ -364,7 +380,6 @@ def generate_and_send_chart(symbol, df, entry, tp, sl, is_penny=False, is_accumu
         
         bot.send_photo(chat_id=CHAT_ID, photo=buf, caption=caption, parse_mode='Markdown')
         plt.close()
-        
     except Exception as e:
         logger.error(f"Chart error {symbol}: {e}")
 
@@ -376,23 +391,15 @@ def open_trade(symbol, price, atr, score_val, size, df, is_penny=False, is_accum
     
     with state_lock:
         state["open_trades"][symbol] = {
-            "entry": price,
-            "tp": tp,
-            "sl": sl,
-            "size": size,
-            "time": time.time(),
-            "score": score_val,
-            "is_penny": is_penny
+            "entry": price, "tp": tp, "sl": sl, "size": size,
+            "time": time.time(), "score": score_val, "is_penny": is_penny
         }
         save_state()
     
-    # إرسال الشارت
     generate_and_send_chart(symbol, df, price, tp, sl, is_penny, is_accumulating, session)
     
-    # إرسال رسالة نصية
     msg = f"""
 🚀 **NEW TRADE OPENED** ({session})
-
 📊 Symbol: `{symbol}`
 💰 Entry: ${price:.2f}
 🎯 TP: ${tp:.2f}
@@ -433,7 +440,6 @@ def close_trade(symbol, price, win=False):
     result = "WIN 🎉" if pnl >= 0 else "LOSS ❌"
     msg = f"""
 🔒 **TRADE CLOSED**
-
 📊 {symbol}
 📉 Exit: ${price:.2f}
 🏆 Result: {result}
@@ -486,27 +492,23 @@ def scan_symbols(symbols, allow_trading=True):
         df = data_cache[symbol]
         price = df["close"].iloc[-1]
         
-        # ================= TRADING HALTS CHECK =================
+        # Trading Halts Check
         halted, halt_date, halt_time, reason, halt_price = check_trading_halt(symbol)
         if halted:
             if not is_halt_alerted(symbol):
                 halt_msg = f"""
 ⛔ **TRADING HALT DETECTED** ⛔
-
 📊 Symbol: `{symbol}`
 📅 Date: {halt_date}
 ⏱️ Time: {halt_time}
 💲 Halt Price: ${halt_price}
 📄 Reason: {reason}
-
-⚠️ Trading is paused for this stock.
 """
                 send_telegram(halt_msg)
                 mark_halt_alerted(symbol)
             continue
-        # ==============================================
         
-        # ================= TECHNICAL ANALYSIS =================
+        # Technical Analysis
         is_penny = is_penny_stock(price)
         is_accumulating, acc_score = detect_accumulation(df)
         pre_breakout = pre_breakout_detection(df)
@@ -517,14 +519,17 @@ def scan_symbols(symbols, allow_trading=True):
         pre_breakout_bonus = 10 if pre_breakout else 0
         final_score = score_val + penny_bonus + accumulation_bonus + pre_breakout_bonus
         
-        # ================= ALERTS (تعمل دائماً) =================
+        # Alerts (with anti-spam)
         if pre_breakout and final_score >= 60:
             send_telegram(f"⚡ **Pre-Breakout Alert!** {symbol} - Score: {final_score} ({session})")
         
+        # 🔥 FIXED: Accumulation Alert with anti-spam
         if is_accumulating and acc_score >= 60:
-            send_telegram(f"📦 **Accumulation Detected!** {symbol} - Score: {acc_score}% ({session})")
+            if should_send_accumulation_alert(symbol, acc_score):
+                send_telegram(f"📦 **Accumulation Detected!** {symbol} - Score: {acc_score}% ({session})")
+                update_accumulation_alert(symbol, acc_score)
         
-        # ================= OPEN TRADES (فقط إذا كان السوق مفتوحاً) =================
+        # Open Trades (only when market is open)
         if allow_trading and is_market_open():
             threshold = PENNY_THRESHOLD if is_penny else MIN_SCORE
             if final_score >= threshold and not is_seen(symbol):
@@ -536,10 +541,8 @@ def scan_symbols(symbols, allow_trading=True):
                     open_trade(symbol, price, atr, final_score, size, df, is_penny, is_accumulating)
                     mark_seen(symbol)
         elif final_score >= 70 and not is_seen(symbol):
-            # خارج أوقات السوق: تنبيه فقط
             msg = f"""
 📊 **Pre-Market Signal** ({session})
-
 📊 Symbol: `{symbol}`
 💰 Price: ${price:.2f}
 ⭐ Score: {final_score}/100
@@ -554,7 +557,6 @@ def send_telegram(msg):
         bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Telegram send error: {e}")
-
 def generate_simple_analysis(symbol):
     df = fetch_polygon(symbol)
     if df is None or len(df) < 30:
@@ -574,14 +576,12 @@ def generate_simple_analysis(symbol):
     
     analysis = f"""
 📊 **{symbol} Analysis** ({session})
-
 💰 Price: ${price:.2f}
 📊 Volume: {volume:,.0f}
 ⚖️ Avg Volume: {avg_volume:,.0f}
 🎢 ATR: {atr:.2f}
 ⚡️ RSI: {rsi:.2f}
 🧠 Score: {score_val}/100
-
 """
     if is_penny:
         analysis += "🔥 **Penny Stock** 🔥\n"
@@ -597,7 +597,7 @@ def generate_simple_analysis(symbol):
 def cmd_start(message):
     session, session_msg = get_market_session()
     welcome = f"""
-🚀 **AI Trading Bot v15 - 24/7 Mode**
+🚀 **AI Trading Bot v15 - 24/7 Mode (No Spam)**
 
 **Current Session:** {session}
 {session_msg}
@@ -609,12 +609,11 @@ def cmd_start(message):
 /performance - Performance stats
 /close <symbol> - Close position
 
-**Auto Alerts (Trading):**
-✅ NEW TRADE OPENED → Message + Chart
-✅ TRADE CLOSED → Result + PnL
-✅ Pre-Breakout Alert → ⚡
-✅ Accumulation Detected → 📦
-✅ Trading Halt Detected → ⛔
+**Auto Alerts:**
+✅ Accumulation Alert (only when score changes by 10% or every 4 hours)
+✅ Pre-Breakout Alert
+✅ Trading Halt Alert
+✅ Trade Open/Close
 """
     bot.reply_to(message, welcome, parse_mode='Markdown')
 
@@ -652,9 +651,7 @@ def cmd_status(message):
         winrate = (total_wins / total * 100) if total else 0
         msg = f"""
 📊 **Bot Status** ({session})
-
 {session_msg}
-
 💰 Capital: ${CAPITAL}
 📈 Open Trades: {len(state['open_trades'])}/{MAX_OPEN_TRADES}
 ✅ Wins: {total_wins}
@@ -715,10 +712,8 @@ def background_scanner():
             symbols = get_enhanced_universe()
             session, _ = get_market_session()
             logger.info(f"🔄 [{session}] Scanning {len(symbols)} symbols...")
-            
             allow_trading = is_market_open()
             scan_symbols(symbols, allow_trading=allow_trading)
-            
             time.sleep(60)
         except Exception as e:
             logger.error(f"Scanner error: {e}")
@@ -753,7 +748,7 @@ if __name__ == "__main__":
     threading.Thread(target=background_scanner, daemon=True).start()
     
     session, session_msg = get_market_session()
-    send_telegram(f"✅ **AI Trading Bot v15 is LIVE!**\n\n🕐 Session: {session}\n{session_msg}\n\n✅ سيتم إرسال جميع الصفقات والتنبيهات تلقائياً")
+    send_telegram(f"✅ **AI Trading Bot v15 is LIVE! (No Spam Mode)**\n\n🕐 Session: {session}\n{session_msg}\n\n✅ Accumulation alerts will NOT repeat unless score changes by 10% or 4 hours pass")
     
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)

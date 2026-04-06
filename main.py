@@ -9,246 +9,247 @@ import pytz
 import telebot
 from collections import deque
 import threading
-import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 
-# ================= CONFIGURATION =================
+# ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 POLYGON_API = os.getenv("POLYGON_API")
 
-# Setup Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
-
-if not TOKEN or not CHAT_ID or not POLYGON_API:
-    logger.error("Missing Environment Variables! Please set TOKEN, CHAT_ID, and POLYGON_API.")
-    exit(1)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
 
 bot = telebot.TeleBot(TOKEN)
+
+data_cache = {}
+seen_signals = deque(maxlen=500)
+dynamic_universe = []
+
+api_lock = threading.Lock()
+last_call = 0
+
+# ================= RATE LIMIT =================
+def rate_limit():
+    global last_call
+    with api_lock:
+        now = time.time()
+        wait = 12.5 - (now - last_call)
+        if wait > 0:
+            time.sleep(wait)
+        last_call = time.time()
 
 # ================= TELEGRAM =================
 def send(msg):
     try:
         requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}
+            data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"},
+            timeout=10
         )
-        logger.info("Telegram message sent successfully.")
-    except Exception as e:
-        logger.error(f"Failed to send Telegram message: {e}")
-
-@bot.message_handler(commands=['start'])
-def start_command(message):
-    bot.reply_to(message, "🚀 <b>AI Institutional Ultra Pro v8.0 (GOD MODE) Active!</b>\n\n"
-                          "✅ <b>NASDAQ Official Halt Radar:</b> Active\n"
-                          "✅ <b>Market Crash Protection:</b> Active\n"
-                          "✅ <b>24/7 Penny Stock Scanner:</b> Active\n"
-                          "✅ <b>Smart Money Accumulation:</b> Active")
-
-# ================= UNIVERSE =================
-def get_universe():
-    return [
-        "AAPL", "MSFT", "NVDA", "AMD", "META", "TSLA", "AMZN", "GOOGL", "PLTR", "SOFI",
-        "BABA", "NIO", "RIOT", "MARA", "COIN", "UBER", "NFLX", "PYPL", "SQ", "CRM",
-        "GME", "AMC", "HOOD", "DKNG", "PLUG", "LCID", "NKLA", "FUBO", "OPEN", "CLOV",
-        "SPY", "QQQ" # For Market Protection
-    ]
-
-# ================= NASDAQ HALT RADAR (OFFICIAL) =================
-processed_halts = set()
-
-def check_nasdaq_halts():
-    url = "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts"
-    ns = {'ndaq': 'http://www.nasdaqtrader.com/'}
-    
-    try:
-        response = requests.get(url, timeout=10)
-        if response.status_code != 200:
-            return
-            
-        root = ET.fromstring(response.content)
-        for item in root.findall('.//item'):
-            symbol = item.find('ndaq:IssueSymbol', ns).text
-            halt_time = item.find('ndaq:HaltTime', ns).text
-            reason = item.find('ndaq:ReasonCode', ns).text
-            resumption_time = item.find('ndaq:ResumptionTradeTime', ns).text
-            
-            halt_id = f"{symbol}_{halt_time}_{reason}"
-            
-            if halt_id not in processed_halts:
-                processed_halts.add(halt_id)
-                
-                if not resumption_time or resumption_time.strip() == "":
-                    # It's a new Halt
-                    msg = (f"⚠️ <b>NASDAQ OFFICIAL HALT</b> ⚠️\n\n"
-                           f"📊 <b>Ticker:</b> #{symbol}\n"
-                           f"🕒 <b>Halt Time:</b> {halt_time}\n"
-                           f"🛑 <b>Reason:</b> {reason}\n"
-                           f"⏰ <b>Detected:</b> {datetime.now(pytz.timezone('US/Eastern')).strftime('%H:%M:%S EST')}\n\n"
-                           f"<i>Monitoring for resumption...</i>")
-                    send(msg)
-                else:
-                    # It's a Resumption
-                    msg = (f"✅ <b>TRADING RESUMED (NASDAQ)</b> ✅\n\n"
-                           f"📊 <b>Ticker:</b> #{symbol}\n"
-                           f"🕒 <b>Resume Time:</b> {resumption_time}\n"
-                           f"🛑 <b>Original Reason:</b> {reason}\n"
-                           f"🚀 <i>Watch for high volatility!</i>")
-                    send(msg)
-                    
-    except Exception as e:
-        logger.error(f"Error checking NASDAQ halts: {e}")
-
-# ================= MARKET CRASH PROTECTION =================
-def check_market_crash():
-    # Check SPY for sudden drops
-    url = f"https://api.polygon.io/v2/aggs/ticker/SPY/range/1/minute/{ (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d') }/{ datetime.now().strftime('%Y-%m-%d') }?apiKey={POLYGON_API}"
-    try:
-        r = requests.get(url, timeout=10).json()
-        if "results" in r and len(r["results"]) > 5:
-            df = pd.DataFrame(r["results"])
-            drop = (df['c'].iloc[-1] - df['c'].iloc[-5]) / df['c'].iloc[-5] * 100
-            if drop < -1.5: # 1.5% drop in 5 minutes
-                msg = (f"🚨 <b>MARKET CRASH WARNING</b> 🚨\n\n"
-                       f"📉 <b>SPY Drop:</b> {drop:.2f}% in 5 mins\n"
-                       f"⚠️ <b>Action:</b> Consider closing all long positions immediately!\n"
-                       f"🛡️ <i>Safety First Mode Active.</i>")
-                send(msg)
-    except Exception as e:
-        logger.error(f"Error checking market crash: {e}")
-
-# ================= POLYGON DATA & INDICATORS =================
-data_cache = {}
-
-def get_data(symbol, timespan="minute", multiplier=15, days_back=10):
-    cache_key = f"{symbol}_{timespan}_{multiplier}_{days_back}"
-    now_utc = datetime.now(pytz.utc)
-    if cache_key in data_cache:
-        cached_time, df = data_cache[cache_key]
-        if (now_utc - cached_time).total_seconds() < 300:
-            return df
-
-    tz = pytz.timezone("US/Eastern")
-    end_date = datetime.now(tz)
-    start_date = end_date - timedelta(days=days_back)
-    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}?adjusted=true&sort=asc&limit=1000&apiKey={POLYGON_API}"
-    
-    try:
-        r = requests.get(url, timeout=10).json()
-        if "results" not in r or len(r["results"]) == 0: return None
-        df = pd.DataFrame(r["results"]).rename(columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume", "t": "timestamp"})
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit='ms', utc=True)
-        df = df.set_index("timestamp")
-        data_cache[cache_key] = (now_utc, df)
-        return df
-    except Exception as e:
-        logger.error(f"Error fetching data for {symbol}: {e}")
-        return None
-
-def calculate_indicators(df):
-    if len(df) < 100: return df
-    df["atr"] = (df["high"] - df["low"]).rolling(14).mean()
-    delta = df["close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    df["rsi"] = 100 - (100 / (1 + (gain / loss)))
-    df["ema_9"] = df["close"].ewm(span=9, adjust=False).mean()
-    df["ema_21"] = df["close"].ewm(span=21, adjust=False).mean()
-    df["bb_mid"] = df["close"].rolling(window=20).mean()
-    bb_std = df["close"].rolling(window=20).std()
-    df["bb_width"] = (bb_std * 4) / df["bb_mid"]
-    df["obv"] = (np.sign(df["close"].diff()) * df["volume"]).fillna(0).cumsum()
-    df["obv_ema"] = df["obv"].ewm(span=20, adjust=False).mean()
-    df["vol_sma_20"] = df["volume"].rolling(window=20).mean()
-    return df
-
-def score_setup(df):
-    score = 0
-    reasons = []
-    current = df.iloc[-1]
-    if current["obv"] > current["obv_ema"]:
-        score += 20
-        reasons.append("Smart Money Accumulation (OBV)")
-    if current["bb_width"] < df["bb_width"].rolling(50).min().iloc[-1] * 1.2:
-        score += 25
-        reasons.append("Volatility Squeeze (Potential Explosion)")
-    if current["close"] > current["ema_21"] and df["ema_9"].iloc[-1] > df["ema_21"].iloc[-1]:
-        score += 15
-        reasons.append("Bullish Trend Alignment")
-    if current["volume"] > current["vol_sma_20"] * 2.5:
-        score += 20
-        reasons.append("Institutional Volume Spike")
-    if current["close"] < 10 and current["volume"] > 1000000:
-        score += 10
-        reasons.append("Active Penny Stock Alert")
-    return score, reasons
-
-def calculate_trade_params(price, atr_val):
-    if atr_val == 0 or np.isnan(atr_val): return None
-    sl_dist = atr_val * 2.0
-    return {"entry": price, "sl": price - sl_dist, "t1": price + (sl_dist * 1.5), "t2": price + (sl_dist * 3.0), "t3": price + (sl_dist * 5.0)}
-
-def get_news(symbol):
-    url = f"https://api.polygon.io/v2/reference/news?ticker={symbol}&limit=1&apiKey={POLYGON_API}"
-    try:
-        r = requests.get(url, timeout=10).json()
-        if "results" in r and len(r["results"]) > 0:
-            news = r["results"][0]
-            return f"📰 <b>Latest News:</b> {news['title']}\n🔗 <a href='{news['article_url']}'>Read More</a>"
     except:
         pass
-    return "📰 <b>News:</b> No recent news found."
 
-# ================= MAIN ENGINE =================
-def run_engine():
-    send("🚀 <b>AI Institutional Ultra Pro v8.0 (GOD MODE) Started</b>\n\n✅ Official NASDAQ Halt Radar\n✅ Market Crash Protection\n✅ 24/7 Scanning Active")
-    seen_signals = deque(maxlen=100)
-    
+# ================= MARKET CHECK =================
+def market_open():
+    tz = pytz.timezone("US/Eastern")
+    now = datetime.now(tz)
+    if now.weekday() >= 5:
+        return False
+    return now.hour >= 4 and now.hour <= 20
+
+# ================= UNIVERSE =================
+def update_universe():
+    global dynamic_universe
+    logger.info("Updating universe...")
+
+    rate_limit()
+    date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    url = f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{date}?adjusted=true&apiKey={POLYGON_API}"
+
+    try:
+        r = requests.get(url, timeout=15).json()
+
+        if "results" not in r:
+            return
+
+        valid = []
+        for x in r["results"]:
+            try:
+                price = x["c"]
+                vol = x["v"]
+                change = (x["c"] - x["o"]) / x["o"]
+
+                if 1 <= price <= 10 and vol > 300000 and change > 0.02:
+                    valid.append(x)
+            except:
+                continue
+
+        valid = sorted(valid, key=lambda x: x["v"], reverse=True)
+
+        dynamic_universe = [x["T"] for x in valid[:40]]  # تقليل الضغط
+
+        if not dynamic_universe:
+            dynamic_universe = ["TSLA", "NVDA", "AMD", "PLTR"]
+
+        logger.info(f"Universe size: {len(dynamic_universe)}")
+
+    except Exception as e:
+        logger.error(f"Universe error: {e}")
+
+# ================= DATA =================
+def fetch(symbol):
+    rate_limit()
+
+    end = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+
+    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/15/minute/{start}/{end}?adjusted=true&apiKey={POLYGON_API}"
+
+    try:
+        r = requests.get(url, timeout=15).json()
+
+        if "results" not in r:
+            return None
+
+        df = pd.DataFrame(r["results"])
+        df.rename(columns={"c":"close","h":"high","l":"low","o":"open","v":"volume"}, inplace=True)
+        return df
+
+    except:
+        return None
+
+# ================= INDICATORS (FIXED) =================
+def indicators(df):
+    df["ema9"] = df["close"].ewm(span=9).mean()
+    df["ema21"] = df["close"].ewm(span=21).mean()
+    df["ema50"] = df["close"].ewm(span=50).mean()
+
+    # RSI (fixed)
+    delta = df["close"].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / (loss + 1e-9)
+    df["rsi"] = 100 - (100 / (1 + rs))
+
+    # ATR (simple)
+    df["tr"] = df["high"] - df["low"]
+    df["atr"] = df["tr"].rolling(14).mean()
+
+    # OBV (FIXED)
+    obv = []
+    prev = 0
+    for i in range(len(df)):
+        if i == 0:
+            obv.append(0)
+            continue
+        if df["close"].iloc[i] > df["close"].iloc[i-1]:
+            prev += df["volume"].iloc[i]
+        elif df["close"].iloc[i] < df["close"].iloc[i-1]:
+            prev -= df["volume"].iloc[i]
+        obv.append(prev)
+
+    df["obv"] = obv
+
+    df["squeeze"] = df["close"].rolling(20).std() < (df["close"].rolling(20).mean() * 0.01)
+
+    return df
+
+# ================= SCORE =================
+def score(df):
+    c = df.iloc[-1]
+    s = 0
+
+    if c["ema9"] > c["ema21"] > c["ema50"]:
+        s += 25
+
+    if 45 < c["rsi"] < 75:
+        s += 15
+
+    if c["volume"] > df["volume"].rolling(20).mean().iloc[-1] * 1.3:
+        s += 15
+
+    if c["obv"] > df["obv"].rolling(10).mean().iloc[-1]:
+        s += 10
+
+    if c["squeeze"]:
+        s += 15
+
+    if c["close"] > df["high"].iloc[-10:].max():
+        s += 15
+
+    if c["close"] < 10:
+        s += 5
+
+    return s
+
+# ================= SCAN =================
+def scan(symbol):
+    try:
+        if symbol in [x["symbol"] for x in seen_signals]:
+            return
+
+        df = fetch(symbol)
+        if df is None or len(df) < 40:
+            return
+
+        df = indicators(df)
+        s = score(df)
+
+        if s >= 75:
+            price = df["close"].iloc[-1]
+            atr = df["atr"].iloc[-1]
+            if pd.isna(atr):
+                atr = price * 0.02
+
+            sl = price - atr * 2
+            tp1 = price + atr * 1.5
+            tp2 = price + atr * 3
+
+            msg = f"""
+🚀 <b>SIGNAL v10.5</b>
+
+📊 {symbol}
+⭐ Score: {s}/100
+
+💰 Entry: {price:.2f}
+🎯 TP1: {tp1:.2f}
+🎯 TP2: {tp2:.2f}
+🛑 SL: {sl:.2f}
+"""
+            send(msg)
+            seen_signals.append({"symbol": symbol, "time": time.time()})
+
+    except:
+        pass
+
+# ================= LOOP =================
+def run():
+    send("🚀 v10.5 Hybrid Engine Started")
+
+    last_update = 0
+
     while True:
         try:
-            # 1. Check NASDAQ Halts (Every 1 minute)
-            check_nasdaq_halts()
-            
-            # 2. Check Market Crash (Every 5 minutes)
-            check_market_crash()
-            
-            # 3. Scan Universe
-            universe = get_universe()
-            now_utc = datetime.now(pytz.utc)
-            for symbol in universe:
-                if symbol in ["SPY", "QQQ"]: continue
-                if any(s["symbol"] == symbol and (now_utc - s["timestamp"]).total_seconds() < 14400 for s in seen_signals):
-                    continue
-                
-                df = get_data(symbol)
-                if df is None or len(df) < 100: continue
-                df = calculate_indicators(df)
-                score, reasons = score_setup(df)
-                
-                if score >= 75:
-                    seen_signals.append({"symbol": symbol, "timestamp": now_utc})
-                    p = calculate_trade_params(df["close"].iloc[-1], df["atr"].iloc[-1])
-                    if p:
-                        reasons_str = "\n".join([f"🔹 {reason}" for reason in reasons])
-                        news_str = get_news(symbol)
-                        msg = f"🚨 <b>AI ULTRA PRO v8.0 SIGNAL</b> 🚨\n\n📊 <b>Ticker:</b> #{symbol}\n⭐ <b>Score:</b> {score}/100\n\n💰 <b>Entry:</b> ${p['entry']:.2f}\n🎯 <b>Targets:</b>\nT1: ${p['t1']:.2f}\nT2: ${p['t2']:.2f}\nT3: ${p['t3']:.2f}\n🛑 <b>Stop Loss:</b> ${p['sl']:.2f}\n\n🧠 <b>Analysis:</b>\n{reasons_str}\n\n{news_str}"
-                        send(msg)
-                        time.sleep(12)
-            
-            time.sleep(60)
-        except Exception as e:
-            logger.error(f"Error in engine: {e}")
+            if time.time() - last_update > 3600:
+                update_universe()
+                last_update = time.time()
+
+            if not market_open():
+                time.sleep(300)
+                continue
+
+            with ThreadPoolExecutor(max_workers=3) as ex:
+                for s in dynamic_universe:
+                    ex.submit(scan, s)
+
             time.sleep(60)
 
+        except Exception as e:
+            logger.error(e)
+            time.sleep(60)
+
+# ================= START =================
 if __name__ == "__main__":
-    threading.Thread(target=run_engine, daemon=True).start()
-    logger.info("Starting Telegram Polling...")
-    try:
-        bot.infinity_polling()
-    except Exception as e:
-        logger.error(f"Polling error: {e}")
-        time.sleep(10)
-        
+    threading.Thread(target=lambda: bot.infinity_polling(), daemon=True).start()
+    run()

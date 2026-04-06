@@ -1,5 +1,13 @@
 FROM python:3.11-slim
+
 WORKDIR /app
-RUN pip install --no-cache-dir requests pyTelegramBotAPI numpy pandas pytz
-COPY main.py .
+
+ENV PYTHONUNBUFFERED=1
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
 CMD ["python", "main.py"]

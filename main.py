@@ -18,6 +18,7 @@ import re
 import xml.etree.ElementTree as ET
 
 # ================= CONFIGURATION =================  #
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")  # ضع مفتاحك في Railway Variables

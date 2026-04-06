@@ -8,82 +8,91 @@ import time
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# ---------------- TELEGRAM ----------------
+
+# ================= TELEGRAM =================
 def send(msg):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    except:
+        pass
 
 
-# ---------------- MARKET MOVERS (LIVE SCAN SIMPLE) ----------------
-def get_market_stocks():
-    # قائمة موسعة + قابلة للتطوير لاحقًا لـ API حقيقي
+# ================= UNIVERSE =================
+def get_stocks():
+    # أسهم سيولة عالية + penny/low price potential
     return [
         "AAPL","TSLA","NVDA","AMD","AMZN","META","PLTR",
-        "SOFI","NIO","RIOT","MARA","CLSK","F","LCID",
-        "BABA","INTC","GOOGL","MSFT","SPY","QQQ"
+        "SOFI","NIO","RIOT","MARA","CLSK","LCID",
+        "F","INTC","BABA","MSFT","GOOGL",
+        "SPY","QQQ"
     ]
 
 
-# ---------------- RSI ----------------
+# ================= RSI =================
 def rsi(series, period=14):
     delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
+    gain = delta.where(delta > 0, 0).rolling(period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
 
-# ---------------- SCORING SYSTEM ----------------
-def score_stock(price, volume, avg_volume, rsi_val, breakout):
+# ================= SCORE ENGINE =================
+def score(price, volume, avg_volume, rsi_val, breakout):
     score = 0
 
     if price < 10:
-        score += 20
-    if volume > avg_volume * 1.5:
+        score += 25
+    if volume > avg_volume * 1.8:
         score += 25
     if rsi_val > 55:
-        score += 25
+        score += 20
     if breakout:
         score += 30
 
     return score
 
 
-# ---------------- ANALYSIS ----------------
+# ================= ANALYSIS =================
 def analyze(symbol):
     try:
         df = yf.download(symbol, period="5d", interval="15m", progress=False)
 
-        if df.empty:
+        if df is None or df.empty:
             return None
 
-        price = df['Close'].iloc[-1]
-        volume = df['Volume'].iloc[-1]
-        avg_volume = df['Volume'].mean()
+        price = float(df['Close'].iloc[-1])
+        volume = float(df['Volume'].iloc[-1])
+        avg_volume = float(df['Volume'].mean())
 
-        if price > 10:
+        # شرط السعر
+        if price <= 0 or price > 10:
             return None
 
+        # RSI
         df['RSI'] = rsi(df['Close'])
-        rsi_val = df['RSI'].iloc[-1]
+        rsi_val = float(df['RSI'].iloc[-1])
 
-        resistance = df['High'].rolling(20).max().iloc[-1]
+        # breakout
+        resistance = float(df['High'].rolling(20).max().iloc[-1])
         breakout = price >= resistance * 0.98
 
-        score = score_stock(price, volume, avg_volume, rsi_val, breakout)
+        final_score = score(price, volume, avg_volume, rsi_val, breakout)
 
-        if score < 70:
+        # فلتر قوي (يقلل الإشارات الضعيفة)
+        if final_score < 80:
             return None
 
         entry = price
         tp1 = round(entry * 1.10, 3)
-        tp2 = round(entry * 1.20, 3)
+        tp2 = round(entry * 1.22, 3)
         tp3 = round(entry * 1.35, 3)
         sl = round(entry * 0.92, 3)
 
         return {
             "symbol": symbol,
-            "score": score,
+            "score": final_score,
             "entry": entry,
             "tp1": tp1,
             "tp2": tp2,
@@ -95,25 +104,28 @@ def analyze(symbol):
         return None
 
 
-# ---------------- SCANNER ----------------
+# ================= MAIN LOOP =================
 def run():
-    send("🚀 البوت المطوّر بدأ مسح السوق...")
+    send("🚀 البوت شغال الآن - يبدأ صيد الفرص قبل الحركة")
+
+    seen = set()
 
     while True:
-        stocks = get_market_stocks()
         results = []
 
-        for s in stocks:
-            data = analyze(s)
-            if data:
-                results.append(data)
+        for s in get_stocks():
+            r = analyze(s)
+            if r and r["symbol"] not in seen:
+                results.append(r)
 
-        # ترتيب أفضل الفرص
-        results = sorted(results, key=lambda x: x['score'], reverse=True)[:5]
+        # ترتيب أقوى الفرص
+        results = sorted(results, key=lambda x: x["score"], reverse=True)[:3]
 
         for r in results:
+            seen.add(r["symbol"])
+
             msg = f"""
-🚀 فرصة قوية محتملة
+🚀 فرصة مضاربة قوية
 
 📊 السهم: {r['symbol']}
 ⭐ القوة: {r['score']}/100
@@ -124,7 +136,7 @@ def run():
 🎯 TP3: {r['tp3']}
 🛑 SL: {r['sl']}
 
-⚡ سكالبينج / مضاربة سريعة
+⚡ سكالبينج / حركة سريعة
 """
             send(msg)
 

@@ -25,16 +25,20 @@ def send(msg):
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.send_message(message.chat.id, "🚀 Market Scanner شغال - يصيد التجميع والانفجار الآن")
+    bot.send_message(message.chat.id, "🚀 UTIS شغال: ذكاء سوق + أخبار + صيد فرص قبل الانفجار")
 
 
-# ================= MARKET UNIVERSE (كبداية قوية) =================
-def get_market():
-    # هذا “Mini Universe” (نقدر نوسعه لاحقًا لـ NASDAQ كامل)
+# ================= MARKET UNIVERSE (ناسداك + بيني ستوكس) =================
+def get_universe():
     return [
-        "AAPL","TSLA","NVDA","AMD","AMZN","META","PLTR","SOFI",
-        "NIO","RIOT","MARA","CLSK","LCID","F","INTC","BABA",
-        "MSFT","GOOGL","SPY","QQQ","DKNG","HOOD","RIVN"
+        # Large Caps
+        "AAPL","TSLA","NVDA","AMD","AMZN","META","MSFT","GOOGL","SPY","QQQ",
+
+        # Growth / Momentum
+        "PLTR","SOFI","HOOD","RIVN","DKNG","BABA","INTC","F",
+
+        # Penny Stocks / High volatility
+        "NIO","RIOT","MARA","CLSK","LCID","WKHS","SNDL","OCGN","TRKA"
     ]
 
 
@@ -51,60 +55,89 @@ def vwap(df):
     return (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
 
 
-# ================= ACCUMULATION DETECTION =================
+# ================= NEWS INTELLIGENCE =================
+def get_news_score(symbol):
+    try:
+        url = f"https://query1.finance.yahoo.com/v1/finance/search?q={symbol}"
+        r = requests.get(url, timeout=5).json()
+        news = r.get("news", [])
+
+        if not news:
+            return 0, None
+
+        title = news[0]["title"].lower()
+
+        positive_words = ["surge", "up", "beats", "profit", "upgrade", "rise"]
+        negative_words = ["drop", "lawsuit", "loss", "investigation", "down"]
+
+        score = 0
+        for w in positive_words:
+            if w in title:
+                score += 10
+        for w in negative_words:
+            if w in title:
+                score -= 10
+
+        return score, title
+
+    except:
+        return 0, None
+
+
+# ================= ACCUMULATION =================
 def is_accumulation(df):
-    recent_vol = df['Volume'].iloc[-5:].mean()
-    past_vol = df['Volume'].iloc[-20:].mean()
+    vol_now = df['Volume'].iloc[-5:].mean()
+    vol_prev = df['Volume'].iloc[-20:].mean()
 
     price_range = df['Close'].iloc[-10:].max() - df['Close'].iloc[-10:].min()
-    last_price = df['Close'].iloc[-1]
-
-    # ضغط سعر + زيادة حجم = تجميع
-    if recent_vol > past_vol * 1.2 and price_range < last_price * 0.04:
-        return True
-
-    return False
-
-
-# ================= BREAKOUT =================
-def is_breakout(df):
-    resistance = df['High'].rolling(20).max().iloc[-2]
     price = df['Close'].iloc[-1]
 
-    return price > resistance * 0.98
+    return vol_now > vol_prev * 1.3 and price_range < price * 0.04
+
+
+# ================= MICRO BREAKOUT =================
+def is_micro_breakout(df):
+    resistance = df['High'].rolling(20).max().iloc[-2]
+    price = df['Close'].iloc[-1]
+    volume = df['Volume'].iloc[-1]
+    avg_vol = df['Volume'].mean()
+
+    return price > resistance * 0.99 and volume > avg_vol * 2
 
 
 # ================= SCORE ENGINE =================
-def score(df):
+def score(df, news_score):
     price = df['Close'].iloc[-1]
     volume = df['Volume'].iloc[-1]
-    avg_volume = df['Volume'].mean()
+    avg_vol = df['Volume'].mean()
 
     rsi_val = rsi(df['Close']).iloc[-1]
     vwap_val = vwap(df).iloc[-1]
 
     acc = is_accumulation(df)
-    brk = is_breakout(df)
+    brk = is_micro_breakout(df)
 
     score = 0
 
-    if price < 15:
+    if price < 10:
         score += 15
-    if volume > avg_volume * 1.5:
+    if volume > avg_vol * 1.8:
         score += 20
-    if 45 < rsi_val < 70:
+    if 45 < rsi_val < 75:
         score += 15
     if price > vwap_val:
         score += 10
     if acc:
         score += 25
     if brk:
-        score += 15
+        score += 20
+
+    score += news_score
 
     return score, acc, brk
 
 
-# ================= ANALYZE SINGLE STOCK =================
+# ================= ANALYZE =================
 def analyze(symbol):
     try:
         df = yf.download(symbol, period="5d", interval="15m", progress=False)
@@ -112,28 +145,42 @@ def analyze(symbol):
         if df is None or df.empty:
             return None
 
-        sc, acc, brk = score(df)
+        news_score, news = get_news_score(symbol)
 
-        if sc < 75:
+        sc, acc, brk = score(df, news_score)
+
+        if sc < 85:
             return None
 
         price = df['Close'].iloc[-1]
+
+        entry = price
+        tp1 = round(entry * 1.10, 3)
+        tp2 = round(entry * 1.20, 3)
+        tp3 = round(entry * 1.35, 3)
+        sl = round(entry * 0.93, 3)
 
         return {
             "symbol": symbol,
             "score": sc,
             "price": price,
+            "entry": entry,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "sl": sl,
             "acc": acc,
-            "brk": brk
+            "brk": brk,
+            "news": news
         }
 
     except:
         return None
 
 
-# ================= SCANNER LOOP =================
-def run_scanner():
-    send("🚀 Scanner بدأ - يبحث عن تجميع + انفجار في السوق كامل")
+# ================= SCANNER =================
+def run():
+    send("🚀 UTIS بدأ - ذكاء سوق + أخبار + تجميع + بيني ستوكس + انفجار قبل حدوثه")
 
     seen = {}
     cooldown = 60 * 60
@@ -141,7 +188,7 @@ def run_scanner():
     while True:
         results = []
 
-        for symbol in get_market():
+        for symbol in get_universe():
             r = analyze(symbol)
 
             if not r:
@@ -152,21 +199,27 @@ def run_scanner():
 
             results.append(r)
 
-        # ترتيب أقوى الفرص
-        results = sorted(results, key=lambda x: x["score"], reverse=True)[:5]
+        results = sorted(results, key=lambda x: x["score"], reverse=True)[:10]
 
         for r in results:
             seen[r["symbol"]] = time.time()
 
             msg = f"""
-🔥 فرصة تجميع قوية / انفجار قريب
+🔥 فرصة قوية جدًا (UTIS)
 
-📊 {r['symbol']}
+📊 السهم: {r['symbol']}
 ⭐ القوة: {r['score']}/100
-💰 السعر: {r['price']}
+
+💰 دخول: {r['entry']}
+🎯 TP1: {r['tp1']}
+🎯 TP2: {r['tp2']}
+🎯 TP3: {r['tp3']}
+🛑 SL: {r['sl']}
 
 📦 تجميع: {"نعم" if r['acc'] else "لا"}
-🚀 اختراق: {"نعم" if r['brk'] else "لا"}
+🚀 انفجار: {"نعم" if r['brk'] else "لا"}
+
+📰 خبر: {r['news']}
 """
 
             send(msg)
@@ -176,5 +229,5 @@ def run_scanner():
 
 # ================= START =================
 if __name__ == "__main__":
-    threading.Thread(target=run_scanner).start()
+    threading.Thread(target=run).start()
     bot.polling()

@@ -32,7 +32,7 @@ MIN_SCORE = 75
 PENNY_THRESHOLD = 65
 SIGNAL_COOLDOWN = 3600
 STATE_FILE = "state.json"
-MAX_SCAN_SYMBOLS = 1000  # ✅ تم التعديل: 500 → 1000
+MAX_SCAN_SYMBOLS = 150  # ✅ تم التعديل: 1000 → 150
 
 # Chart settings
 plt.style.use('dark_background')
@@ -95,49 +95,45 @@ def reset_daily_loss_if_needed():
             state["last_reset"] = today
             save_state()
 
-# ================= LARGE UNIVERSE (1000+ STOCKS) =================
-# قائمة موسعة من الأسهم النشطة
+# ================= LARGE UNIVERSE (150 STOCKS) =================
+# ✅ تم التعديل: إزالة BRK.B واستبدالها بـ BRK-B
 large_universe = [
     # Mega Cap
-    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "BRK.B", "LLY", "JPM",
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "BRK-B", "LLY", "JPM",
     "V", "XOM", "UNH", "WMT", "PG", "JNJ", "MA", "HD", "CVX", "BAC", "KO", "PEP",
     "COST", "ADBE", "CRM", "NFLX", "DIS", "AMD", "INTC", "CMCSA", "PFE", "TMO",
     "ABT", "DHR", "NKE", "LIN", "UPS", "SBUX", "LOW", "RTX", "HON", "CAT", "GS",
     "MS", "C", "WFC", "SPGI", "BLK", "AXP", "BK", "DE", "GE", "MMM", "AMGN",
     "TXN", "QCOM", "MU", "ADI", "NXPI", "MRVL", "LRCX", "KLAC", "AMAT", "ON",
-    "AVGO", "SNOW", "NET", "DDOG", "ZS", "MDB", "CRWD", "PANW", "OKTA", "DOCU",
+    
+    # Tech & Growth
+    "PLTR", "SNOW", "NET", "DDOG", "ZS", "MDB", "CRWD", "PANW", "OKTA", "DOCU",
     "TEAM", "ROKU", "SHOP", "SQ", "AFRM", "UPST", "SOFI", "PYPL", "UBER", "LYFT",
-    "DASH", "ABNB", "RBLX", "U", "FVRR", "PINS", "SNAP", "SPOT", "ZM", "PLTR",
+    "DASH", "ABNB", "RBLX", "U", "FVRR", "PINS", "SNAP", "SPOT", "ZM",
     
-    # Mid Cap
-    "TTD", "DKNG", "PENN", "CZR", "MGM", "WYNN", "LVS", "BYD", "DKNG", "ACHR",
-    "JOBY", "LILM", "MBLY", "INDI", "QS", "RIVN", "LCID", "FSR", "NKLA", "GOEV",
-    "BLNK", "CHPT", "PLUG", "FCEL", "SUNW", "SPWR", "ENPH", "RUN", "NIO", "XPEV",
-    "LI", "GME", "AMC", "BB", "KOSS", "EXPR", "NAKD", "SNDL", "TLRY", "ACB",
-    "CGC", "CRON", "OGI", "HITI", "VFF", "AACQ", "BKKT", "DWAC", "PHUN", "CFVI",
+    # Semiconductors
+    "AVGO", "QCOM", "MU", "TXN", "ADI", "NXPI", "MRVL", "LRCX", "KLAC", "AMAT",
     
-    # Crypto & Fintech
-    "COIN", "HOOD", "SI", "RIOT", "MARA", "CLSK", "HUT", "BITF", "MIGI", "BTBT",
-    "CAN", "SDIG", "WULF", "ARBK", "CIFR", "HIVE", "BKKT", "MSTR", "PYPL", "SQ",
+    # Consumer & Retail
+    "TGT", "DLTR", "DG", "ROST", "TJX", "M", "KSS", "JWN", "BBY", "BABA", "JD",
+    "PDD", "MELI", "SE", "CPNG", "ETSY", "W", "CHWY",
     
-    # Biotech
-    "BIIB", "REGN", "VRTX", "GILD", "ILMN", "INCY", "ALXN", "BMRN", "SGEN", "MRNA",
-    "BNTX", "NVAX", "CVAC", "SRNE", "CLOV", "HGEN", "NBY", "VXRT", "OCGN", "SENS",
+    # Penny stocks (high volatility)
+    "GME", "AMC", "BB", "NIO", "XPEV", "LI", "RIVN", "LCID", "FSR", "NKLA",
+    "GOEV", "QS", "BLNK", "CHPT", "PLUG", "FCEL", "SUNW", "SPWR", "ENPH", "RUN",
+    "RIOT", "MARA", "CLSK", "HUT", "BITF", "MIGI", "BTBT",
+    
+    # Fintech & Crypto
+    "COIN", "HOOD", "SI", "SOFI", "PYPL", "SQ", "AFRM", "UPST", "LC", "LU",
     
     # Energy
-    "XOM", "CVX", "COP", "EOG", "PXD", "OXY", "HES", "DVN", "MPC", "PSX", "VLO",
-    "BP", "SHEL", "TTE", "EQNR", "ENB", "KMI", "WMB", "OKE", "TRP", "ET", "EPD",
+    "XOM", "CVX", "COP", "EOG", "PXD", "OXY", "HES", "DVN", "MPC", "PSX",
     
     # Industrial
-    "BA", "RTX", "LMT", "NOC", "GD", "LHX", "HII", "GE", "HON", "MMM", "CAT", "DE",
-    "CARR", "OTIS", "TT", "PH", "ITW", "EMR", "ETN", "CMI", "AME", "ROP", "ADP",
-    
-    # Consumer
-    "TGT", "DLTR", "DG", "ROST", "TJX", "M", "KSS", "JWN", "BBY", "BABA", "JD",
-    "PDD", "MELI", "SE", "CPNG", "ETSY", "W", "CHWY", "CVNA", "KMX", "CAR", "HTZ"
+    "BA", "RTX", "LMT", "NOC", "GD", "LHX", "HII", "GE", "HON", "MMM"
 ]
 
-# نأخذ أول 1000 سهم
+# نأخذ أول 150 سهم
 dynamic_universe = large_universe[:MAX_SCAN_SYMBOLS]
 
 def get_universe():
@@ -214,14 +210,13 @@ def score_from_cached(df):
         w = state["weights"]
     s = 0
     
-    # ✅ AI boost (حركة قوية)
+    # AI boost (حركة قوية)
     if df["close"].iloc[-1] > df["close"].iloc[-5]:
         s += 5
     
     if c["ema9"] > c["ema21"]:
         s += w["trend"]
     
-    # ✅ تم التعديل: 45-75 → 50-70
     if 50 < c["rsi"] < 70:
         s += w["rsi"]
     
@@ -457,7 +452,7 @@ def build_cache(symbols, period='5d', interval='15m'):
         df = fetch_yfinance_data(symbol, period, interval)
         if df is not None and len(df) >= 30:
             new_cache[symbol] = compute_indicators(df)
-        time.sleep(0.05)
+        time.sleep(0.2)  # ✅ تم التعديل: 0.05 → 0.2
     data_cache = new_cache
     logger.info(f"Cached {len(data_cache)} symbols")
 
@@ -472,7 +467,7 @@ def update_positions():
             close_trade(symbol, price, win=False)
 
 def quick_filter_stocks(symbols):
-    """✅ فلترة سريعة محسنة - أذكى وأسرع"""
+    """فلترة سريعة محسنة - أذكى وأسرع"""
     promising = []
     total = len(symbols)
     
@@ -484,22 +479,22 @@ def quick_filter_stocks(symbols):
                 volume = quick['volume']
                 avg_volume = quick['avg_volume']
                 
-                # ✅ شرط فلترة محسن
+                # شرط فلترة محسن
                 if 2 < price < 150 and volume > 100000 and volume > avg_volume * 1.2:
                     promising.append(symbol)
             
-            # إظهار التقدم كل 100 سهم
-            if (i + 1) % 100 == 0:
+            # إظهار التقدم كل 50 سهم
+            if (i + 1) % 50 == 0:
                 logger.info(f"Quick filter progress: {i+1}/{total} symbols")
                 
         except Exception as e:
             continue
         
-        # ✅ تم التعديل: 0.05 → 0.01 ثانية
-        time.sleep(0.01)
+        # ✅ تم التعديل: 0.01 → 0.1 ثانية
+        time.sleep(0.1)
     
     logger.info(f"Quick filter: {len(promising)} promising stocks out of {total}")
-    return promising[:200]  # نرجع أول 200 سهم واعد
+    return promising[:100]  # نرجع أول 100 سهم واعد
 
 def deep_analysis(symbols):
     """تحليل عميق للأسهم الواعدة"""
@@ -519,13 +514,13 @@ def deep_analysis(symbols):
         if score_val >= MIN_SCORE - 10:
             results.append((symbol, score_val, df))
         
-        # ✅ تم التعديل: 0.1 → 0.03 ثانية
-        time.sleep(0.03)
+        # ✅ تم التعديل: 0.03 → 0.1 ثانية
+        time.sleep(0.1)
     
     return sorted(results, key=lambda x: x[1], reverse=True)
 
 def scan_large_universe():
-    """المسح الكامل لـ 1000+ سهم"""
+    """المسح الكامل لـ 150 سهم"""
     session, _ = get_market_session()
     logger.info(f"🚀 Starting large universe scan ({len(dynamic_universe)} symbols) - {session}")
     
@@ -541,7 +536,7 @@ def scan_large_universe():
     logger.info(f"Step 2: Deep analysis of {len(promising_stocks)} stocks...")
     top_signals = deep_analysis(promising_stocks)
     
-     # الخطوة 3: معالجة الإشارات القوية - ✅ تم التعديل: 10 → 5 إشارات فقط
+    # الخطوة 3: معالجة الإشارات القوية - أفضل 5 إشارات فقط
     logger.info(f"Step 3: Processing {len(top_signals)} strong signals...")
     for symbol, score_val, df in top_signals[:5]:
         if score_val >= MIN_SCORE and not is_seen(symbol):
@@ -597,7 +592,7 @@ def generate_simple_analysis(symbol):
 def cmd_start(message):
     session, session_msg = get_market_session()
     welcome = f"""
-🚀 **AI Trading Bot v17 - 1000+ Stocks Scanner**
+🚀 **AI Trading Bot v18 - 150 Stocks Scanner**
 
 **Current Session:** {session}
 {session_msg}
@@ -610,7 +605,7 @@ def cmd_start(message):
 /close <symbol> - Close position
 
 **Features:**
-✅ Scans 1000+ stocks automatically
+✅ Scans 150 stocks automatically
 ✅ Smart filtering (AI style)
 ✅ Accumulation Detection
 ✅ Pre-Breakout Alert
@@ -722,37 +717,6 @@ def background_scanner():
 # ================= WEBHOOK =================
 @app.route("/", methods=['GET'])
 def home():
-    return "AI Trading Bot v17 - 1000+ Stocks Scanner Running"
+    return "AI Trading Bot v18 - 150 Stocks Scanner Running"
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    try:
-        update = telebot.types.Update.de_json(request.data.decode("utf-8"))
-        bot.process_new_updates([update])
-        return "ok", 200
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return "error", 500
-
-# ================= START =================
-if __name__ == "__main__":
-    load_state()
-    reset_daily_loss_if_needed()
-    
-    # إزالة أي webhook قديم وتجنب خطأ 409
-    if bot:
-        try:
-            bot.remove_webhook()
-            logger.info("Removed existing webhook")
-        except:
-            pass
-    
-    threading.Thread(target=background_scanner, daemon=True).start()
-    
-    if bot:
-        threading.Thread(target=lambda: bot.infinity_polling(timeout=10, long_polling_timeout=5), daemon=True).start()
-    
-    send_telegram("✅ **AI Trading Bot v17 - 1000+ Stocks Scanner is LIVE!**\n\n✅ Scans 1000+ stocks automatically\n✅ Smart AI filtering\n✅ Accumulation & Pre-Breakout detection\n✅ Trading Halts Monitor")
-    
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+@app.route("/webhook

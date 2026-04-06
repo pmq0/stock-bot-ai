@@ -23,7 +23,11 @@ CHAT_ID = os.getenv("CHAT_ID")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 
 if not TELEGRAM_TOKEN or not CHAT_ID or not FINNHUB_API_KEY:
-    raise ValueError("Missing required environment variables")
+    print("⚠️ WARNING: Missing environment variables!")
+    print("TELEGRAM_TOKEN:", "SET" if TELEGRAM_TOKEN else "MISSING")
+    print("CHAT_ID:", "SET" if CHAT_ID else "MISSING")
+    print("FINNHUB_API_KEY:", "SET" if FINNHUB_API_KEY else "MISSING")
+    # لا نوقف البوت، نعطيه فرصة
 
 CAPITAL = 10000.0
 RISK_PER_TRADE = 0.02

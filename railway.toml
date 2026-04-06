@@ -1,0 +1,1 @@
+[build]\nbuilder = "DOCKERFILE"\ndockerfilePath = "Dockerfile"\n\n[deploy]\nrestartPolicyType = "ON_FAILURE"\nrestartPolicyMaxRetries = 10

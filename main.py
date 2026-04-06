@@ -11,7 +11,7 @@ from flask import Flask, request
 import telebot
 import pytz
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-import finnhub
+import yfinance as yf
 import io
 import matplotlib.pyplot as plt
 import re
@@ -20,14 +20,9 @@ import xml.etree.ElementTree as ET
 # ================= CONFIGURATION =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 
-if not TELEGRAM_TOKEN or not CHAT_ID or not FINNHUB_API_KEY:
-    print("⚠️ WARNING: Missing environment variables!")
-    print("TELEGRAM_TOKEN:", "SET" if TELEGRAM_TOKEN else "MISSING")
-    print("CHAT_ID:", "SET" if CHAT_ID else "MISSING")
-    print("FINNHUB_API_KEY:", "SET" if FINNHUB_API_KEY else "MISSING")
-    # لا نوقف البوت، نعطيه فرصة
+if not TELEGRAM_TOKEN or not CHAT_ID:
+    raise ValueError("Missing required environment variables: TELEGRAM_TOKEN, CHAT_ID")
 
 CAPITAL = 10000.0
 RISK_PER_TRADE = 0.02
@@ -54,9 +49,6 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 # ThreadPoolExecutor
 executor = ThreadPoolExecutor(max_workers=2)
-
-# Finnhub client
-finnhub_client = finnhub.Client(api_key=FINNHUB_API_KEY)
 
 # ================= STATE MANAGEMENT =================
 state_lock = threading.RLock()
@@ -105,54 +97,43 @@ def reset_daily_loss_if_needed():
 # ================= GLOBAL UNIVERSE =================
 initial_universe = [
     "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "TSLA",
-    "GME", "AMC", "PLTR", "SOFI", "NIO", "RIOT", "MARA", "CLSK"
+    "GME", "AMC", "PLTR", "SOFI", "NIO", "RIOT", "MARA", "CLSK",
+    "AMD", "INTC", "NFLX", "DIS", "UBER", "PYPL", "ADBE", "CRM"
 ]
 
 dynamic_universe = initial_universe.copy()
 
-# ================= RATE LIMIT =================
-_last_api_call = 0
-_api_lock = threading.Lock()
-
-def rate_limit():
-    global _last_api_call
-    with _api_lock:
-        now = time.time()
-        wait = 1.0 - (now - _last_api_call)
-        if wait > 0:
-            time.sleep(wait)
-        _last_api_call = time.time()
-
-# ================= FINNHUB DATA =================
-def fetch_finnhub_candles(symbol, resolution='15', count=100):
-    rate_limit()
+# ================= DATA ENGINE (YFINANCE) =================
+def fetch_yfinance_data(symbol, period='5d', interval='15m'):
+    """Fetch OHLCV data from Yahoo Finance"""
     try:
-        to_time = int(time.time())
-        from_time = to_time - (count * 60 * 15)
-        res = finnhub_client.stock_candles(symbol, resolution, from_time, to_time)
-        if res and res.get('s') == 'ok':
-            df = pd.DataFrame({
-                't': res['t'],
-                'o': res['o'],
-                'h': res['h'],
-                'l': res['l'],
-                'c': res['c'],
-                'v': res['v']
-            })
-            df = df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'})
-            return df[['open', 'high', 'low', 'close', 'volume']].astype(float)
-        else:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period=period, interval=interval)
+        if df.empty:
+            logger.warning(f"No data found for {symbol}")
             return None
+        df = df.rename(columns={
+            'Open': 'open',
+            'High': 'high',
+            'Low': 'low',
+            'Close': 'close',
+            'Volume': 'volume'
+        })
+        return df[['open', 'high', 'low', 'close', 'volume']].astype(float)
     except Exception as e:
-        logger.error(f"Fetch error {symbol}: {e}")
+        logger.error(f"YFinance fetch error {symbol}: {e}")
         return None
 
-def fetch_quote(symbol):
-    rate_limit()
+def fetch_yfinance_realtime(symbol):
+    """Get real-time quote using yfinance"""
     try:
-        return finnhub_client.quote(symbol)
+        ticker = yf.Ticker(symbol)
+        data = ticker.history(period='1d', interval='1m')
+        if not data.empty:
+            return {'c': data['close'].iloc[-1]}
+        return None
     except Exception as e:
-        logger.error(f"Quote error {symbol}: {e}")
+        logger.error(f"YFinance realtime error {symbol}: {e}")
         return None
 
 # ================= INDICATORS =================
@@ -166,6 +147,7 @@ def compute_indicators(df):
     rs = gain / (loss + 1e-9)
     df["rsi"] = 100 - (100/(1+rs))
     df["atr"] = (df["high"] - df["low"]).rolling(14).mean()
+    
     obv = [0]
     for i in range(1, len(df)):
         if df["close"].iloc[i] > df["close"].iloc[i-1]:
@@ -174,6 +156,7 @@ def compute_indicators(df):
             obv.append(obv[-1] - df["volume"].iloc[i])
     df["obv"] = obv
     df["vol_ma"] = df["volume"].rolling(20).mean()
+    
     df["sma"] = df["close"].rolling(20).mean()
     df["std"] = df["close"].rolling(20).std()
     df["upper_band"] = df["sma"] + (df["std"] * 2)
@@ -185,18 +168,20 @@ def score_from_cached(df):
     if df is None or len(df) < 30:
         return 0
     c = df.iloc[-1]
+    with state_lock:
+        w = state["weights"]
     s = 0
     if c["ema9"] > c["ema21"]:
-        s += 20
+        s += w["trend"]
     if 45 < c["rsi"] < 75:
-        s += 15
+        s += w["rsi"]
     if c["volume"] > c["vol_ma"] * 1.3:
-        s += 15
+        s += w["volume"]
     if c["obv"] > df["obv"].rolling(10).mean().iloc[-1]:
-        s += 10
+        s += w["obv"]
     recent_high = df["high"].iloc[-10:].max()
     if c["close"] > recent_high:
-        s += 15
+        s += w["breakout"]
     return min(100, s)
 
 def is_penny_stock(price):
@@ -214,6 +199,7 @@ def detect_accumulation(df):
     recent_high = last_10['high'].max()
     recent_low = last_10['low'].min()
     tight_range = (recent_high - recent_low) / df['close'].iloc[-1] < 0.03
+    
     acc_score = 0
     if price_stable: acc_score += 25
     if volume_surge: acc_score += 30
@@ -229,17 +215,53 @@ def pre_breakout_detection(df):
     volume_surge = df['volume'].iloc[-3:].mean() > df['volume'].rolling(20).mean().iloc[-1] * 1.5
     return is_squeezing and approaching and volume_surge
 
+# ================= TRADING HALTS (Nasdaq RSS) =================
+def check_trading_halt(symbol):
+    try:
+        rss_url = "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts"
+        response = requests.get(rss_url, timeout=10)
+        if response.status_code == 200:
+            root = ET.fromstring(response.content)
+            for item in root.findall('.//item'):
+                title = item.find('title').text if item.find('title') is not None else ''
+                description = item.find('description').text if item.find('description') is not None else ''
+                if symbol in title or symbol in description:
+                    price_match = re.search(r'PauseThresholdPrice:\s*\$?([0-9]+\.[0-9]+)', description)
+                    halt_price = price_match.group(1) if price_match else "N/A"
+                    time_match = re.search(r'(\d{1,2}:\d{2}:\d{2})\s*ET', description)
+                    halt_time = time_match.group(1) if time_match else "N/A"
+                    reason_match = re.search(r'Reason:\s*(.+?)(?:\.|$)', description)
+                    reason = reason_match.group(1) if reason_match else "Trading Pause"
+                    return True, datetime.now().strftime('%Y-%m-%d'), halt_time, reason, halt_price
+    except Exception as e:
+        logger.error(f"Halt check error {symbol}: {e}")
+    return False, None, None, None, None
+
 # ================= SIGNAL CONTROL =================
 def is_seen(symbol):
+    now = time.time()
     with state_lock:
         if symbol in state["seen_signals"]:
-            if time.time() - state["seen_signals"][symbol] < SIGNAL_COOLDOWN:
+            if now - state["seen_signals"][symbol] < SIGNAL_COOLDOWN:
                 return True
     return False
 
 def mark_seen(symbol):
     with state_lock:
         state["seen_signals"][symbol] = time.time()
+        save_state()
+
+def is_halt_alerted(symbol):
+    now = time.time()
+    with state_lock:
+        if symbol in state["halted_alerts"]:
+            if now - state["halted_alerts"][symbol] < 3600:
+                return True
+    return False
+
+def mark_halt_alerted(symbol):
+    with state_lock:
+        state["halted_alerts"][symbol] = time.time()
         save_state()
 
 def should_send_accumulation_alert(symbol, new_score):
@@ -277,8 +299,10 @@ def get_market_session():
         return "REGULAR HOURS", "🟢 تداول نشط"
     elif 4 <= hour < 9:
         return "PRE-MARKET", "🟡 تحليل فقط"
+    elif 16 <= hour < 20:
+        return "AFTER-HOURS", "🟡 سيولة منخفضة"
     else:
-        return "AFTER-HOURS", "🟡 تحليل فقط"
+        return "OVERNIGHT", "🔵 تحضير لليوم التالي"
 
 # ================= RISK MANAGEMENT =================
 def can_trade(price, atr):
@@ -299,13 +323,7 @@ def can_trade(price, atr):
             return False, 0
     return True, size
 
-# ================= TELEGRAM FUNCTIONS =================
-def send_telegram(msg):
-    try:
-        bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Telegram error: {e}")
-
+# ================= CHART GENERATION =================
 def generate_and_send_chart(symbol, df, entry, tp, sl, is_penny=False, is_accumulating=False, session=""):
     try:
         df_plot = df.tail(60).copy()
@@ -326,6 +344,7 @@ def generate_and_send_chart(symbol, df, entry, tp, sl, is_penny=False, is_accumu
         ax1.legend(loc='upper left', fontsize=9)
         ax1.grid(True, alpha=0.2)
         ax1.tick_params(colors='white')
+        
         colors = ['green' if df_plot['close'].iloc[i] >= df_plot['close'].iloc[i-1] else 'red' for i in range(len(df_plot))]
         ax2.bar(df_plot.index, df_plot['volume'], color=colors, alpha=0.7)
         ax2.axhline(y=df_plot['vol_ma'].iloc[-1], color='blue', linestyle='--', linewidth=1, label=f'Avg Volume')
@@ -380,33 +399,38 @@ def close_trade(symbol, price, win=False):
 def update_universe():
     global dynamic_universe
     logger.info("Updating universe...")
-    try:
-        all_symbols = finnhub_client.stock_symbols('US')
-        if all_symbols and len(all_symbols) > 0:
-            symbols_list = [item['symbol'] for item in all_symbols if 'symbol' in item]
-            new_symbols = symbols_list[:100]
-            dynamic_universe = list(set(initial_universe + new_symbols))
-            logger.info(f"Universe updated: {len(dynamic_universe)} symbols")
-    except Exception as e:
-        logger.error(f"Universe update error: {e}")
+    # للبقاء ضمن حدود yfinance، نستخدم القائمة اليدوية
+    # يمكن إضافة المزيد من الرموز حسب الحاجة
+    pass
 
-# ================= SCAN =================
+# ================= CACHE & SCAN =================
 data_cache = {}
 
-def build_cache(symbols):
+def build_cache(symbols, period='5d', interval='15m'):
     global data_cache
     new_cache = {}
     for symbol in symbols:
-        df = fetch_finnhub_candles(symbol, '15', 100)
+        df = fetch_yfinance_data(symbol, period, interval)
         if df is not None and len(df) >= 30:
             new_cache[symbol] = compute_indicators(df)
-        time.sleep(0.05)
+        time.sleep(0.1)
     data_cache = new_cache
     logger.info(f"Cached {len(data_cache)} symbols")
 
+def update_positions():
+    for symbol, trade in list(state["open_trades"].items()):
+        if symbol not in data_cache:
+            continue
+        price = data_cache[symbol]["close"].iloc[-1]
+        if price >= trade["tp"]:
+            close_trade(symbol, price, win=True)
+        elif price <= trade["sl"]:
+            close_trade(symbol, price, win=False)
+
 def scan_symbols(symbols, allow_trading=True):
     build_cache(symbols)
-    session, _ = get_market_session()
+    update_positions()
+    session, session_msg = get_market_session()
     for symbol in symbols:
         if symbol not in data_cache:
             continue
@@ -414,19 +438,36 @@ def scan_symbols(symbols, allow_trading=True):
             continue
         df = data_cache[symbol]
         price = df["close"].iloc[-1]
-        quote = fetch_quote(symbol)
-        current_price = quote['c'] if quote else price
+        current_price = price
+        
+        # Trading halt
+        halted, halt_date, halt_time, reason, halt_price = check_trading_halt(symbol)
+        if halted:
+            if not is_halt_alerted(symbol):
+                halt_msg = f"⛔ **TRADING HALT**\n📊 {symbol}\n📅 {halt_date} {halt_time}\n💲 ${halt_price}\n📄 {reason}"
+                send_telegram(halt_msg)
+                mark_halt_alerted(symbol)
+            continue
+        
+        # Analysis
         is_penny = is_penny_stock(current_price)
         is_accumulating, acc_score = detect_accumulation(df)
         pre_breakout = pre_breakout_detection(df)
         score_val = score_from_cached(df)
-        final_score = score_val + (10 if is_penny else 0) + (15 if is_accumulating else 0) + (10 if pre_breakout else 0)
+        penny_bonus = 10 if is_penny else 0
+        accumulation_bonus = 15 if is_accumulating else 0
+        pre_breakout_bonus = 10 if pre_breakout else 0
+        final_score = score_val + penny_bonus + accumulation_bonus + pre_breakout_bonus
+        
+        # Alerts
         if pre_breakout and final_score >= 60:
-            send_telegram(f"⚡ **Pre-Breakout** {symbol} - Score: {final_score} ({session})")
+            send_telegram(f"⚡ **Pre-Breakout Alert!** {symbol} - Score: {final_score} ({session})")
         if is_accumulating and acc_score >= 60:
             if should_send_accumulation_alert(symbol, acc_score):
-                send_telegram(f"📦 **Accumulation** {symbol} - {acc_score}% ({session})")
+                send_telegram(f"📦 **Accumulation Detected!** {symbol} - Score: {acc_score}% ({session})")
                 update_accumulation_alert(symbol, acc_score)
+        
+        # Open trade
         if allow_trading and is_market_open():
             threshold = PENNY_THRESHOLD if is_penny else MIN_SCORE
             if final_score >= threshold and not is_seen(symbol):
@@ -437,11 +478,65 @@ def scan_symbols(symbols, allow_trading=True):
                 if ok:
                     open_trade(symbol, current_price, atr, final_score, size, df, is_penny, is_accumulating)
                     mark_seen(symbol)
+        elif final_score >= 70 and not is_seen(symbol):
+            send_telegram(f"📊 **Pre-Market Signal** ({session})\n📊 {symbol}\n💰 ${current_price:.2f}\n⭐ Score {final_score}\n🔥 {session_msg}")
+            mark_seen(symbol)
+
+# ================= TELEGRAM FUNCTIONS =================
+def send_telegram(msg):
+    try:
+        bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Telegram send error: {e}")
+
+def generate_simple_analysis(symbol):
+    df = fetch_yfinance_data(symbol, '5d', '15m')
+    if df is None or len(df) < 30:
+        return f"⚠️ No sufficient data for {symbol}"
+    df = compute_indicators(df)
+    session, _ = get_market_session()
+    score_val = score_from_cached(df)
+    price = df["close"].iloc[-1]
+    atr = df["atr"].iloc[-1]
+    volume = df["volume"].iloc[-1]
+    avg_volume = df["vol_ma"].iloc[-1]
+    rsi = df["rsi"].iloc[-1]
+    is_penny = is_penny_stock(price)
+    is_accumulating, acc_score = detect_accumulation(df)
+    pre_breakout = pre_breakout_detection(df)
+    analysis = f"📊 **{symbol} Analysis** ({session})\n💰 Price: ${price:.2f}\n📊 Volume: {volume:,.0f}\n⚖️ Avg Volume: {avg_volume:,.0f}\n🎢 ATR: {atr:.2f}\n⚡️ RSI: {rsi:.2f}\n🧠 Score: {score_val}/100\n"
+    if is_penny:
+        analysis += "🔥 **Penny Stock** 🔥\n"
+    if is_accumulating:
+        analysis += f"📦 **Accumulation Pattern** ({acc_score}%)\n"
+    if pre_breakout:
+        analysis += "⚡ **Pre-Breakout Detected** ⚡\n"
+    return analysis
 
 # ================= TELEGRAM COMMANDS =================
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
-    welcome = "🚀 **AI Trading Bot v15**\n\n/scan SYMBOL - تحليل سهم\n/status - حالة البوت\n/positions - الصفقات المفتوحة\n/performance - الأداء\n/close SYMBOL - إغلاق صفقة"
+    session, session_msg = get_market_session()
+    welcome = f"""
+🚀 **AI Trading Bot v15 - Yahoo Finance**
+
+**Current Session:** {session}
+{session_msg}
+
+**Commands:**
+/scan <symbol> - Technical analysis
+/status - Bot status
+/positions - Open positions
+/performance - Performance stats
+/close <symbol> - Close position
+
+**Features:**
+✅ Free data from Yahoo Finance
+✅ Accumulation Detection
+✅ Pre-Breakout Alert
+✅ Trading Halts Monitor
+✅ Automatic Charts
+"""
     bot.reply_to(message, welcome, parse_mode='Markdown')
 
 @bot.message_handler(commands=['scan'])
@@ -449,26 +544,32 @@ def cmd_scan(message):
     try:
         parts = message.text.split()
         if len(parts) != 2:
-            bot.reply_to(message, "⚠️ استخدم: /scan <symbol>")
+            bot.reply_to(message, "⚠️ Usage: /scan <symbol>")
             return
         symbol = parts[1].upper()
-        msg = bot.reply_to(message, f"🔍 Analyzing {symbol}...")
-        df = fetch_finnhub_candles(symbol, '15', 100)
-        if df is None or len(df) < 30:
-            bot.edit_message_text(f"⚠️ No data for {symbol}", chat_id=message.chat.id, message_id=msg.message_id)
-            return
-        df = compute_indicators(df)
-        score_val = score_from_cached(df)
-        price = df["close"].iloc[-1]
-        analysis = f"📊 **{symbol}**\n💰 Price: ${price:.2f}\n🧠 Score: {score_val}/100\n⚡️ RSI: {df['rsi'].iloc[-1]:.1f}\n📊 Volume: {df['volume'].iloc[-1]:.0f}"
-        bot.edit_message_text(analysis, chat_id=message.chat.id, message_id=msg.message_id, parse_mode='Markdown')
+        processing_msg = bot.reply_to(message, f"🔍 Analyzing {symbol}...")
+        def do_analysis():
+            analysis = generate_simple_analysis(symbol)
+            bot.edit_message_text(chat_id=message.chat.id, message_id=processing_msg.message_id, text=analysis, parse_mode='Markdown')
+        future = executor.submit(do_analysis)
+        try:
+            future.result(timeout=15)
+        except TimeoutError:
+            bot.edit_message_text(chat_id=message.chat.id, message_id=processing_msg.message_id, text="⚠️ Timeout, try again")
     except Exception as e:
         logger.error(f"Scan error: {e}")
+        bot.reply_to(message, "❌ Error")
 
 @bot.message_handler(commands=['status'])
 def cmd_status(message):
+    reset_daily_loss_if_needed()
+    session, session_msg = get_market_session()
     with state_lock:
-        msg = f"📊 **Status**\n💰 Capital: ${CAPITAL}\n📈 Open: {len(state['open_trades'])}/{MAX_OPEN_TRADES}\n📉 Daily Loss: ${state['daily_loss']:.2f}\n📊 Universe: {len(dynamic_universe)} stocks"
+        total_wins = sum(p["wins"] for p in state["performance"].values())
+        total_losses = sum(p["losses"] for p in state["performance"].values())
+        total = total_wins + total_losses
+        winrate = (total_wins / total * 100) if total else 0
+        msg = f"📊 **Bot Status** ({session})\n{session_msg}\n💰 Capital: ${CAPITAL}\n📈 Open Trades: {len(state['open_trades'])}/{MAX_OPEN_TRADES}\n✅ Wins: {total_wins}\n❌ Losses: {total_losses}\n📈 Winrate: {winrate:.1f}%\n📉 Daily Loss: ${state['daily_loss']:.2f} / ${DAILY_LOSS_LIMIT}\n⚙️ Weights: {state['weights']}\n📊 Universe: {len(dynamic_universe)} stocks"
     bot.reply_to(message, msg, parse_mode='Markdown')
 
 @bot.message_handler(commands=['positions'])
@@ -479,7 +580,20 @@ def cmd_positions(message):
             return
         msg = "**Open Positions**\n"
         for sym, t in state["open_trades"].items():
-            msg += f"\n🔹 {sym} | Entry ${t['entry']:.2f} | TP ${t['tp']:.2f} | SL ${t['sl']:.2f}"
+            msg += f"\n🔹 {sym} | Entry ${t['entry']:.2f} | TP ${t['tp']:.2f} | SL ${t['sl']:.2f} | Shares {t['size']}"
+    bot.reply_to(message, msg, parse_mode='Markdown')
+
+@bot.message_handler(commands=['performance'])
+def cmd_performance(message):
+    with state_lock:
+        if not state["performance"]:
+            bot.reply_to(message, "No completed trades yet")
+            return
+        msg = "**Per-Symbol Performance**\n"
+        for sym, p in state["performance"].items():
+            total = p["wins"] + p["losses"]
+            wr = (p["wins"] / total * 100) if total else 0
+            msg += f"\n{sym}: {p['wins']}W / {p['losses']}L ({wr:.1f}%)"
     bot.reply_to(message, msg, parse_mode='Markdown')
 
 @bot.message_handler(commands=['close'])
@@ -493,33 +607,53 @@ def cmd_close(message):
         if symbol not in state["open_trades"]:
             bot.reply_to(message, f"No open trade for {symbol}")
             return
-    quote = fetch_quote(symbol)
-    if not quote:
-        bot.reply_to(message, f"Cannot get price for {symbol}")
+    df = fetch_yfinance_data(symbol, '1d', '5m')
+    if df is None or len(df) == 0:
+        bot.reply_to(message, f"Cannot fetch price for {symbol}")
         return
-    close_trade(symbol, quote['c'], win=False)
-    bot.reply_to(message, f"Closed {symbol} at ${quote['c']:.2f}")
+    price = df["close"].iloc[-1]
+    close_trade(symbol, price, win=False)
+    bot.reply_to(message, f"Manually closed {symbol} at ${price:.2f}")
 
-# ================= MAIN =================
+# ================= BACKGROUND SCANNER =================
 def background_scanner():
     global dynamic_universe
-    last_update = 0
     while True:
         try:
-            if time.time() - last_update > 3600:
-                update_universe()
-                last_update = time.time()
-            scan_symbols(dynamic_universe, allow_trading=is_market_open())
+            symbols = dynamic_universe
+            session, _ = get_market_session()
+            logger.info(f"🔄 [{session}] Scanning {len(symbols)} symbols...")
+            allow_trading = is_market_open()
+            scan_symbols(symbols, allow_trading=allow_trading)
             time.sleep(60)
         except Exception as e:
             logger.error(f"Scanner error: {e}")
             time.sleep(60)
 
+# ================= WEBHOOK =================
+@app.route("/", methods=['GET'])
+def home():
+    return "AI Trading Bot v15 - Yahoo Finance Running"
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    try:
+        update = telebot.types.Update.de_json(request.data.decode("utf-8"))
+        bot.process_new_updates([update])
+        return "ok", 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return "error", 500
+
+# ================= START =================
 if __name__ == "__main__":
     load_state()
-    update_universe()
+    reset_daily_loss_if_needed()
+    
     threading.Thread(target=background_scanner, daemon=True).start()
-    threading.Thread(target=lambda: bot.infinity_polling(timeout=10), daemon=True).start()
-    send_telegram("✅ Bot Started - Finnhub Mode")
+    threading.Thread(target=lambda: bot.infinity_polling(timeout=10, long_polling_timeout=5), daemon=True).start()
+    
+    send_telegram("✅ **AI Trading Bot v15 - Yahoo Finance is LIVE!**\n\n✅ Free data from Yahoo Finance\n✅ Accumulation Detection\n✅ Pre-Breakout Alerts\n✅ Trading Halts Monitor")
+    
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)

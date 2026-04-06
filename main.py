@@ -213,7 +213,6 @@ def pre_breakout_detection(df):
 
 # ================= TRADING HALTS (مع السعر والوقت) =================
 def check_trading_halt(symbol):
-    """تجلب بيانات الإيقاف من Nasdaq RSS Feed مع السعر والوقت والتاريخ"""
     try:
         rss_url = "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts"
         response = requests.get(rss_url, timeout=10)
@@ -226,15 +225,12 @@ def check_trading_halt(symbol):
                 description = item.find('description').text if item.find('description') is not None else ''
                 
                 if symbol in title or symbol in description:
-                    # استخراج السعر
                     price_match = re.search(r'PauseThresholdPrice:\s*\$?([0-9]+\.[0-9]+)', description)
                     halt_price = price_match.group(1) if price_match else "N/A"
                     
-                    # استخراج الوقت
                     time_match = re.search(r'(\d{1,2}:\d{2}:\d{2})\s*ET', description)
                     halt_time = time_match.group(1) if time_match else "N/A"
                     
-                    # استخراج السبب
                     reason_match = re.search(r'Reason:\s*(.+?)(?:\.|$)', description)
                     reason = reason_match.group(1) if reason_match else "Trading Pause"
                     
@@ -271,6 +267,30 @@ def mark_halt_alerted(symbol):
         state["halted_alerts"][symbol] = time.time()
         save_state()
 
+# ================= MARKET HOURS =================
+def is_market_open():
+    tz = pytz.timezone("US/Eastern")
+    now = datetime.now(tz)
+    if now.weekday() >= 5:
+        return False
+    open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return open_time <= now <= close_time
+
+def get_market_session():
+    tz = pytz.timezone("US/Eastern")
+    now = datetime.now(tz)
+    hour = now.hour
+    
+    if 9 <= hour < 16:
+        return "REGULAR HOURS", "🟢 تداول نشط - يمكن فتح صفقات"
+    elif 4 <= hour < 9:
+        return "PRE-MARKET", "🟡 تحليل فقط - انتظر الافتتاح"
+    elif 16 <= hour < 20:
+        return "AFTER-HOURS", "🟡 تحليل فقط - سيولة منخفضة"
+    else:
+        return "OVERNIGHT", "🔵 تحضير لليوم التالي"
+
 # ================= RISK MANAGEMENT =================
 def can_trade(price, atr):
     reset_daily_loss_if_needed()
@@ -293,7 +313,7 @@ def can_trade(price, atr):
     return True, size
 
 # ================= CHART GENERATION =================
-def generate_and_send_chart(symbol, df, entry, tp, sl, is_penny=False, is_accumulating=False):
+def generate_and_send_chart(symbol, df, entry, tp, sl, is_penny=False, is_accumulating=False, session=""):
     try:
         df_plot = df.tail(60).copy()
         
@@ -314,7 +334,7 @@ def generate_and_send_chart(symbol, df, entry, tp, sl, is_penny=False, is_accumu
         if df['bandwidth'].iloc[-1] < df['bandwidth'].iloc[-10] * 0.7:
             ax1.axvspan(df_plot.index[-5], df_plot.index[-1], alpha=0.3, color='yellow', label='Pre-Breakout')
         
-        ax1.set_title(f'{symbol} - Trading Signal', fontsize=14, color='white')
+        ax1.set_title(f'{symbol} - Trading Signal ({session})', fontsize=14, color='white')
         ax1.set_ylabel('Price ($)', color='white')
         ax1.legend(loc='upper left', fontsize=9)
         ax1.grid(True, alpha=0.2)
@@ -352,6 +372,8 @@ def generate_and_send_chart(symbol, df, entry, tp, sl, is_penny=False, is_accumu
 def open_trade(symbol, price, atr, score_val, size, df, is_penny=False, is_accumulating=False):
     tp = price + atr * 2
     sl = price - atr * 2
+    session, _ = get_market_session()
+    
     with state_lock:
         state["open_trades"][symbol] = {
             "entry": price,
@@ -364,10 +386,12 @@ def open_trade(symbol, price, atr, score_val, size, df, is_penny=False, is_accum
         }
         save_state()
     
-    generate_and_send_chart(symbol, df, price, tp, sl, is_penny, is_accumulating)
+    # إرسال الشارت
+    generate_and_send_chart(symbol, df, price, tp, sl, is_penny, is_accumulating, session)
     
+    # إرسال رسالة نصية
     msg = f"""
-🚀 **NEW TRADE OPENED**
+🚀 **NEW TRADE OPENED** ({session})
 
 📊 Symbol: `{symbol}`
 💰 Entry: ${price:.2f}
@@ -383,7 +407,7 @@ def open_trade(symbol, price, atr, score_val, size, df, is_penny=False, is_accum
         msg += "📦 **Accumulation Pattern - Pre-Breakout** 📦\n"
     
     send_telegram(msg)
-    logger.info(f"Opened {symbol} at {price}")
+    logger.info(f"✅ OPENED {symbol} at {price}")
 
 def close_trade(symbol, price, win=False):
     with state_lock:
@@ -405,6 +429,7 @@ def close_trade(symbol, price, win=False):
             elif winrate < 0.4:
                 state["weights"]["breakout"] = max(state["weights"]["breakout"] - 1, 5)
         save_state()
+    
     result = "WIN 🎉" if pnl >= 0 else "LOSS ❌"
     msg = f"""
 🔒 **TRADE CLOSED**
@@ -416,17 +441,7 @@ def close_trade(symbol, price, win=False):
 📊 Daily Loss: ${state['daily_loss']:.2f} / ${DAILY_LOSS_LIMIT}
 """
     send_telegram(msg)
-    logger.info(f"Closed {symbol}: {result} PnL {pnl:.2f}")
-
-# ================= MARKET HOURS =================
-def is_market_open():
-    tz = pytz.timezone("US/Eastern")
-    now = datetime.now(tz)
-    if now.weekday() >= 5:
-        return False
-    open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
-    close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
-    return open_time <= now <= close_time
+    logger.info(f"🔒 CLOSED {symbol}: {result} PnL ${pnl:.2f}")
 
 # ================= CACHE & SCAN =================
 data_cache = {}
@@ -457,9 +472,10 @@ def get_enhanced_universe():
     penny_symbols = ["SOFI", "NIO", "PLTR", "RIOT", "MARA", "CLSK", "AMC", "GME", "BB", "SNDL"]
     return list(set(main_symbols + penny_symbols))
 
-def scan_symbols(symbols):
+def scan_symbols(symbols, allow_trading=True):
     build_cache(symbols)
     update_positions()
+    session, session_msg = get_market_session()
     
     for symbol in symbols:
         if symbol not in data_cache:
@@ -490,6 +506,7 @@ def scan_symbols(symbols):
             continue
         # ==============================================
         
+        # ================= TECHNICAL ANALYSIS =================
         is_penny = is_penny_stock(price)
         is_accumulating, acc_score = detect_accumulation(df)
         pre_breakout = pre_breakout_detection(df)
@@ -498,29 +515,38 @@ def scan_symbols(symbols):
         penny_bonus = 10 if is_penny else 0
         accumulation_bonus = 15 if is_accumulating else 0
         pre_breakout_bonus = 10 if pre_breakout else 0
-        
         final_score = score_val + penny_bonus + accumulation_bonus + pre_breakout_bonus
-        threshold = PENNY_THRESHOLD if is_penny else MIN_SCORE
         
-        if final_score < threshold:
-            continue
+        # ================= ALERTS (تعمل دائماً) =================
+        if pre_breakout and final_score >= 60:
+            send_telegram(f"⚡ **Pre-Breakout Alert!** {symbol} - Score: {final_score} ({session})")
         
-        atr = df["atr"].iloc[-1]
-        if pd.isna(atr):
-            atr = price * 0.02
+        if is_accumulating and acc_score >= 60:
+            send_telegram(f"📦 **Accumulation Detected!** {symbol} - Score: {acc_score}% ({session})")
         
-        ok, size = can_trade(price, atr)
-        if not ok:
-            continue
-        
-        if pre_breakout:
-            send_telegram(f"⚡ **Pre-Breakout Alert!** {symbol} - Expected move in minutes!")
-        
-        if is_accumulating:
-            send_telegram(f"📦 **Accumulation Detected!** {symbol} - Score: {acc_score}%")
-        
-        open_trade(symbol, price, atr, final_score, size, df, is_penny, is_accumulating)
-        mark_seen(symbol)
+        # ================= OPEN TRADES (فقط إذا كان السوق مفتوحاً) =================
+        if allow_trading and is_market_open():
+            threshold = PENNY_THRESHOLD if is_penny else MIN_SCORE
+            if final_score >= threshold and not is_seen(symbol):
+                atr = df["atr"].iloc[-1]
+                if pd.isna(atr):
+                    atr = price * 0.02
+                ok, size = can_trade(price, atr)
+                if ok:
+                    open_trade(symbol, price, atr, final_score, size, df, is_penny, is_accumulating)
+                    mark_seen(symbol)
+        elif final_score >= 70 and not is_seen(symbol):
+            # خارج أوقات السوق: تنبيه فقط
+            msg = f"""
+📊 **Pre-Market Signal** ({session})
+
+📊 Symbol: `{symbol}`
+💰 Price: ${price:.2f}
+⭐ Score: {final_score}/100
+🔥 Status: {session_msg}
+"""
+            send_telegram(msg)
+            mark_seen(symbol)
 
 # ================= TELEGRAM FUNCTIONS =================
 def send_telegram(msg):
@@ -534,6 +560,7 @@ def generate_simple_analysis(symbol):
     if df is None or len(df) < 30:
         return f"⚠️ No sufficient data for {symbol}"
     
+    session, _ = get_market_session()
     score_val = score_from_cached(df)
     price = df["close"].iloc[-1]
     atr = df["atr"].iloc[-1]
@@ -546,52 +573,6 @@ def generate_simple_analysis(symbol):
     pre_breakout = pre_breakout_detection(df)
     
     analysis = f"""
-📊 **{symbol} Analysis**
+📊 **{symbol} Analysis** ({session})
 
-💰 Price: ${price:.2f}
-📊 Volume: {volume:,.0f}
-⚖️ Avg Volume: {avg_volume:,.0f}
-🎢 ATR: {atr:.2f}
-⚡️ RSI: {rsi:.2f}
-🧠 Score: {score_val}/100
-
-"""
-    if is_penny:
-        analysis += "🔥 **Penny Stock** 🔥\n"
-    if is_accumulating:
-        analysis += f"📦 **Accumulation Pattern** ({acc_score}%)\n"
-    if pre_breakout:
-        analysis += "⚡ **Pre-Breakout Detected** ⚡\n"
-    
-    return analysis
-
-# ================= TELEGRAM COMMANDS =================
-@bot.message_handler(commands=['start'])
-def cmd_start(message):
-    welcome = """
-🚀 **AI Trading Bot v15 - Full Features**
-
-**Commands:**
-/scan <symbol> - Technical analysis
-/status - Bot status
-/positions - Open positions
-/performance - Performance stats
-/close <symbol> - Close position
-
-**Features Active:**
-✅ Auto Market Scanning (Every Minute)
-✅ Penny Stock Hunting
-✅ Accumulation Detection
-✅ Pre-Breakout Alert
-✅ Trading Halts Monitor (with Price, Time, Date, Reason)
-✅ Automatic Charts
-✅ Adaptive Learning
-"""
-    bot.reply_to(message, welcome, parse_mode='Markdown')
-
-@bot.message_handler(commands=['scan'])
-def cmd_scan(message):
-    try:
-        parts = message.text.split()
-        if len(parts) != 2:
-            bot.reply
+💰 Price: ${price:.2f

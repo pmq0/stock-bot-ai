@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import pytz
 import telebot
 from collections import deque
+import threading
 
 # ================= CONFIGURATION =================
 TOKEN = os.getenv("TOKEN")
@@ -38,6 +39,10 @@ def send(msg):
     except Exception as e:
         logger.error(f"Failed to send Telegram message: {e}")
 
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    bot.reply_to(message, "🚀 <b>AI Institutional Ultra Pro v6.0 Active!</b>\n\nI am scanning the US Stock Market for high-probability setups. Signals will be sent automatically.")
+
 # ================= UNIVERSE =================
 def get_universe():
     return [
@@ -61,18 +66,20 @@ def is_market_open():
 # ================= POLYGON DATA =================
 data_cache = {}
 
-def get_data(symbol, timespan="minute", multiplier=15, days_back=30):
+def get_data(symbol, timespan="minute", multiplier=15, days_back=10):
     cache_key = f"{symbol}_{timespan}_{multiplier}_{days_back}"
+    now_utc = datetime.now(pytz.utc)
+    
     if cache_key in data_cache:
         cached_time, df = data_cache[cache_key]
-        if (datetime.now() - cached_time).total_seconds() < 300:
+        if (now_utc - cached_time).total_seconds() < 300:
             return df
 
     tz = pytz.timezone("US/Eastern")
     end_date = datetime.now(tz)
     start_date = end_date - timedelta(days=days_back)
     
-    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start_date.strftime(\"%Y-%m-%d\")}/{end_date.strftime(\"%Y-%m-%d\")}?adjusted=true&sort=asc&limit=5000&apiKey={POLYGON_API}"
+    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}?adjusted=true&sort=asc&limit=1000&apiKey={POLYGON_API}"
     
     try:
         r = requests.get(url, timeout=10).json()
@@ -81,10 +88,14 @@ def get_data(symbol, timespan="minute", multiplier=15, days_back=30):
             
         df = pd.DataFrame(r["results"])
         df = df.rename(columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume", "vw": "vwap", "t": "timestamp"})
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit=\"ms\", utc=True).dt.tz_convert(tz)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit='ms', utc=True)
         df = df.set_index("timestamp")
         
-        data_cache[cache_key] = (datetime.now(), df)
+        # Liquidity Filter: Skip low volume stocks
+        if df["volume"].iloc[-1] < 200000:
+            return None
+            
+        data_cache[cache_key] = (now_utc, df)
         return df
     except Exception as e:
         logger.error(f"Error fetching data for {symbol}: {e}")
@@ -119,7 +130,6 @@ def calculate_indicators(df):
     df["bb_upper"] = df["bb_middle"] + (bb_std * 2)
     df["bb_lower"] = df["bb_middle"] - (bb_std * 2)
     df["vol_sma_20"] = df["volume"].rolling(window=20).mean()
-    df["vol_sma_50"] = df["volume"].rolling(window=50).mean()
     return df
 
 # ================= SCORING ENGINE =================
@@ -174,7 +184,7 @@ def calculate_trade_params(price, atr_val, account_balance=10000, risk_per_trade
 
 # ================= ANALYSIS PIPELINE =================
 def analyze(symbol):
-    df = get_data(symbol, days_back=60)
+    df = get_data(symbol, days_back=10)
     if df is None or len(df) < 200:
         return None
     df = calculate_indicators(df)
@@ -191,8 +201,8 @@ def analyze(symbol):
     return {"symbol": symbol, "score": score, "price": current["close"], "reasons": reasons, "params": trade_params, "time": datetime.now(pytz.timezone("US/Eastern")).strftime("%H:%M:%S EST")}
 
 # ================= MAIN ENGINE =================
-def run():
-    startup_msg = "🚀 <b>AI Institutional Ultra Pro v5.0 Started</b>\n\n✅ Advanced Indicators\n✅ Dynamic Risk Management\n✅ Market Hours Filtering\n✅ Railway Deployment Ready"
+def run_engine():
+    startup_msg = "🚀 <b>AI Institutional Ultra Pro v6.0 Started</b>\n\n✅ Advanced Indicators\n✅ Dynamic Risk Management\n✅ Market Hours Filtering\n✅ Railway Deployment Ready\n✅ Polling Active"
     send(startup_msg)
     seen_signals = deque(maxlen=100)
     while True:
@@ -202,21 +212,34 @@ def run():
                 time.sleep(300)
                 continue
             universe = get_universe()
+            now_utc = datetime.now(pytz.utc)
             for symbol in universe:
-                if any(s["symbol"] == symbol and (time.time() - s["timestamp"]).total_seconds() < 7200 for s in seen_signals):
+                # Fixed seen_signals logic using UTC comparison
+                if any(s["symbol"] == symbol and (now_utc - s["timestamp"]).total_seconds() < 7200 for s in seen_signals):
                     continue
                 r = analyze(symbol)
                 if r:
-                    seen_signals.append({"symbol": r["symbol"], "timestamp": datetime.now()})
+                    seen_signals.append({"symbol": r["symbol"], "timestamp": now_utc})
                     p = r["params"]
                     reasons_str = "\n".join([f"🔹 {reason}" for reason in r["reasons"]])
-                    msg = f"🚨 <b>AI ULTRA PRO SIGNAL</b> 🚨\n\n📊 <b>Ticker:</b> #{r[\"symbol\"]}\n⭐ <b>Score:</b> {r[\"score\"]}/100\n⏰ <b>Time:</b> {r[\"time\"]}\n\n💰 <b>Entry:</b> ${p[\"entry\"]:.2f}\n\n🎯 <b>Targets:</b>\nT1: ${p[\"t1\"]:.2f}\nT2: ${p[\"t2\"]:.2f}\nT3: ${p[\"t3\"]:.2f}\n\n🛑 <b>Stop Loss:</b> ${p[\"sl\"]:.2f}\n\n⚖️ <b>R/R:</b> 1:{p[\"risk_reward\"]}\n📦 <b>Size:</b> {p[\"shares\"]} shares\n\n🧠 <b>Confluence:</b>\n{reasons_str}"
+                    msg = f"🚨 <b>AI ULTRA PRO SIGNAL</b> 🚨\n\n📊 <b>Ticker:</b> #{r['symbol']}\n⭐ <b>Score:</b> {r['score']}/100\n⏰ <b>Time:</b> {r['time']}\n\n💰 <b>Entry:</b> ${p['entry']:.2f}\n\n🎯 <b>Targets:</b>\nT1: ${p['t1']:.2f}\nT2: ${p['t2']:.2f}\nT3: ${p['t3']:.2f}\n\n🛑 <b>Stop Loss:</b> ${p['sl']:.2f}\n\n⚖️ <b>R/R:</b> 1:{p['risk_reward']}\n📦 <b>Size:</b> {p['shares']} shares\n\n🧠 <b>Confluence:</b>\n{reasons_str}"
                     send(msg)
-                    time.sleep(15)
+                    time.sleep(12) # Respect Polygon Free Tier (5 calls/min)
             time.sleep(300)
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Error in engine: {e}")
             time.sleep(60)
 
 if __name__ == "__main__":
-    run()
+    # Start the engine in a separate thread
+    engine_thread = threading.Thread(target=run_engine, daemon=True)
+    engine_thread.start()
+    
+    # Start Telegram Polling in the main thread
+    logger.info("Starting Telegram Polling...")
+    try:
+        bot.infinity_polling()
+    except Exception as e:
+        logger.error(f"Polling error: {e}")
+        time.sleep(10)
+        

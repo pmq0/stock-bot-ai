@@ -630,5 +630,132 @@ Commands:
 /performance - Performance stats
 /close <symbol> - Close position
 
-Features:
-✅ Wide Universe
+**Features:**
+✅ Wide Universe (500+ stocks, auto-updated)
+✅ Real-time quotes
+✅ Accumulation & Pre-Breakout detection
+✅ Trading halts monitor
+✅ Automatic charts
+"""
+    bot.reply_to(message, welcome, parse_mode='Markdown')
+
+@bot.message_handler(commands=['scan'])
+def cmd_scan(message):
+    try:
+        parts = message.text.split()
+        if len(parts) != 2:
+            bot.reply_to(message, "⚠️ Usage: /scan <symbol>")
+            return
+        symbol = parts[1].upper()
+        processing_msg = bot.reply_to(message, f"🔍 Analyzing {symbol}...")
+        def do_analysis():
+            analysis = generate_simple_analysis(symbol)
+            bot.edit_message_text(chat_id=message.chat.id, message_id=processing_msg.message_id, text=analysis, parse_mode='Markdown')
+        future = executor.submit(do_analysis)
+        try:
+            future.result(timeout=15)
+        except TimeoutError:
+            bot.edit_message_text(chat_id=message.chat.id, message_id=processing_msg.message_id, text="⚠️ Timeout, try again")
+    except Exception as e:
+        logger.error(f"Scan error: {e}")
+        bot.reply_to(message, "❌ Error")
+
+@bot.message_handler(commands=['status'])
+def cmd_status(message):
+    reset_daily_loss_if_needed()
+    session, session_msg = get_market_session()
+    with state_lock:
+        total_wins = sum(p["wins"] for p in state["performance"].values())
+        total_losses = sum(p["losses"] for p in state["performance"].values())
+        total = total_wins + total_losses
+        winrate = (total_wins / total * 100) if total else 0
+        msg = f"📊 **Bot Status** ({session})\n{session_msg}\n💰 Capital: ${CAPITAL}\n📈 Open Trades: {len(state['open_trades'])}/{MAX_OPEN_TRADES}\n✅ Wins: {total_wins}\n❌ Losses: {total_losses}\n📈 Winrate: {winrate:.1f}%\n📉 Daily Loss: ${state['daily_loss']:.2f} / ${DAILY_LOSS_LIMIT}\n⚙️ Weights: {state['weights']}\n📊 Universe: {len(dynamic_universe)} stocks"
+    bot.reply_to(message, msg, parse_mode='Markdown')
+
+@bot.message_handler(commands=['positions'])
+def cmd_positions(message):
+    with state_lock:
+        if not state["open_trades"]:
+            bot.reply_to(message, "No open positions")
+            return
+        msg = "**Open Positions**\n"
+        for sym, t in state["open_trades"].items():
+            msg += f"\n🔹 {sym} | Entry ${t['entry']:.2f} | TP ${t['tp']:.2f} | SL ${t['sl']:.2f} | Shares {t['size']}"
+    bot.reply_to(message, msg, parse_mode='Markdown')
+
+@bot.message_handler(commands=['performance'])
+def cmd_performance(message):
+    with state_lock:
+        if not state["performance"]:
+            bot.reply_to(message, "No completed trades yet")
+            return
+        msg = "**Per-Symbol Performance**\n"
+        for sym, p in state["performance"].items():
+            total = p["wins"] + p["losses"]
+            wr = (p["wins"] / total * 100) if total else 0
+            msg += f"\n{sym}: {p['wins']}W / {p['losses']}L ({wr:.1f}%)"
+    bot.reply_to(message, msg, parse_mode='Markdown')
+
+@bot.message_handler(commands=['close'])
+def cmd_close(message):
+    parts = message.text.split()
+    if len(parts) != 2:
+        bot.reply_to(message, "Usage: /close <symbol>")
+        return
+    symbol = parts[1].upper()
+    with state_lock:
+        if symbol not in state["open_trades"]:
+            bot.reply_to(message, f"No open trade for {symbol}")
+            return
+    quote = fetch_quote(symbol)
+    if quote is None:
+        bot.reply_to(message, f"Cannot fetch price for {symbol}")
+        return
+    price = quote['c']
+    close_trade(symbol, price, win=False)
+    bot.reply_to(message, f"Manually closed {symbol} at ${price:.2f}")
+
+# ================= BACKGROUND SCANNER =================
+def background_scanner():
+    global dynamic_universe
+    last_universe_update = 0
+    while True:
+        try:
+            if time.time() - last_universe_update > 4 * 3600:
+                update_universe()
+                last_universe_update = time.time()
+            symbols = dynamic_universe
+            session, _ = get_market_session()
+            logger.info(f"🔄 [{session}] Scanning {len(symbols)} symbols...")
+            allow_trading = is_market_open()
+            scan_symbols(symbols, allow_trading=allow_trading)
+            time.sleep(60)
+        except Exception as e:
+            logger.error(f"Scanner error: {e}")
+            time.sleep(60)
+
+# ================= WEBHOOK =================
+@app.route("/", methods=['GET'])
+def home():
+    return "AI Trading Bot v15 - Finnhub Wide Scan Running"
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    try:
+        update = telebot.types.Update.de_json(request.data.decode("utf-8"))
+        bot.process_new_updates([update])
+        return "ok", 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return "error", 500
+
+# ================= START =================
+if __name__ == "__main__":
+    load_state()
+    reset_daily_loss_if_needed()
+    update_universe()  # تحديث أولي
+    threading.Thread(target=lambda: bot.infinity_polling(timeout=10, long_polling_timeout=5), daemon=True).start()
+    threading.Thread(target=background_scanner, daemon=True).start()
+    send_telegram("✅ **AI Trading Bot v15 - Finnhub Wide Scan is LIVE!**\n\n✅ Universe: 500+ stocks (auto-updated)\n✅ Real-time quotes\n✅ Accumulation & Pre-Breakout alerts\n✅ Trading halts monitor")
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

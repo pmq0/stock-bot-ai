@@ -1,3 +1,5 @@
-python-telegram-bot==20.3
-yfinance
-pandas
+pyTelegramBotAPI==4.14.0
+yfinance==0.2.26
+pandas==2.1.1
+numpy==1.26.5
+requests==2.31.0

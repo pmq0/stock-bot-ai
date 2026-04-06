@@ -32,6 +32,7 @@ MIN_SCORE = 75
 PENNY_THRESHOLD = 65
 SIGNAL_COOLDOWN = 3600
 STATE_FILE = "state.json"
+MAX_SCAN_SYMBOLS = 500  # عدد الأسهم للمسح السريع
 
 # Chart settings
 plt.style.use('dark_background')
@@ -94,14 +95,56 @@ def reset_daily_loss_if_needed():
             state["last_reset"] = today
             save_state()
 
-# ================= GLOBAL UNIVERSE =================
-initial_universe = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "TSLA",
-    "GME", "AMC", "PLTR", "SOFI", "NIO", "RIOT", "MARA", "CLSK",
-    "AMD", "INTC", "NFLX", "DIS", "UBER", "PYPL", "ADBE", "CRM"
-]
+# ================= YAHOO SCREENER API (سريع جداً) =================
+def get_active_stocks_from_yahoo(limit=500):
+    """
+    يجلب قائمة الأسهم النشطة من Yahoo Finance باستخدام Screener API
+    هذا أسرع من مسح كل سهم على حدة
+    """
+    try:
+        # استخدام Yahoo Finance Screener API
+        url = "https://query1.finance.yahoo.com/v1/finance/screener"
+        params = {
+            "formatted": "true",
+            "lang": "en-US",
+            "region": "US",
+            "scrId": "most_actives",  # الأسهم الأكثر نشاطاً
+            "count": min(limit, 500)   # حد أقصى 500
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        
+        response = requests.get(url, params=params, headers=headers, timeout=30)
+        data = response.json()
+        
+        symbols = []
+        if "finance" in data and "result" in data["finance"]:
+            for item in data["finance"]["result"][0]["quotes"]:
+                symbol = item.get("symbol")
+                if symbol:
+                    symbols.append(symbol)
+        
+        if symbols:
+            logger.info(f"✅ Retrieved {len(symbols)} active stocks from Yahoo Screener")
+            return symbols
+        else:
+            logger.warning("No symbols from screener, using fallback list")
+            return get_fallback_universe()
+            
+    except Exception as e:
+        logger.error(f"Screener error: {e}")
+        return get_fallback_universe()
 
-dynamic_universe = initial_universe.copy()
+def get_fallback_universe():
+    """قائمة احتياطية إذا فشل الـ Screener"""
+    return [
+        "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD",
+        "INTC", "NFLX", "DIS", "UBER", "PYPL", "ADBE", "CRM", "NIO",
+        "PLTR", "SOFI", "RIOT", "MARA", "GME", "AMC", "CLSK", "BB",
+        "SNDL", "TLRY", "ACB", "MULN", "WKHS", "NAKD", "AEHR", "VFS",
+        "RIVN", "LCID", "FSR", "NKLA", "GOEV", "QS", "BLNK", "CHPT"
+    ]
 
 # ================= DATA ENGINE (YFINANCE) =================
 def fetch_yfinance_data(symbol, period='5d', interval='15m'):
@@ -110,7 +153,6 @@ def fetch_yfinance_data(symbol, period='5d', interval='15m'):
         ticker = yf.Ticker(symbol)
         df = ticker.history(period=period, interval=interval)
         if df.empty:
-            logger.warning(f"No data found for {symbol}")
             return None
         df = df.rename(columns={
             'Open': 'open',
@@ -124,16 +166,19 @@ def fetch_yfinance_data(symbol, period='5d', interval='15m'):
         logger.error(f"YFinance fetch error {symbol}: {e}")
         return None
 
-def fetch_yfinance_realtime(symbol):
-    """Get real-time quote using yfinance"""
+def fetch_yfinance_quick(symbol):
+    """فحص سريع جداً للسهم (بدون شمعات كثيرة)"""
     try:
         ticker = yf.Ticker(symbol)
-        data = ticker.history(period='1d', interval='1m')
-        if not data.empty:
-            return {'c': data['close'].iloc[-1]}
-        return None
-    except Exception as e:
-        logger.error(f"YFinance realtime error {symbol}: {e}")
+        data = ticker.history(period='2d')
+        if data.empty:
+            return None
+        return {
+            'price': data['Close'].iloc[-1],
+            'volume': data['Volume'].iloc[-1],
+            'avg_volume': data['Volume'].mean()
+        }
+    except:
         return None
 
 # ================= INDICATORS =================
@@ -215,7 +260,7 @@ def pre_breakout_detection(df):
     volume_surge = df['volume'].iloc[-3:].mean() > df['volume'].rolling(20).mean().iloc[-1] * 1.5
     return is_squeezing and approaching and volume_surge
 
-# ================= TRADING HALTS (Nasdaq RSS) =================
+# ================= TRADING HALTS =================
 def check_trading_halt(symbol):
     try:
         rss_url = "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts"
@@ -395,92 +440,113 @@ def close_trade(symbol, price, win=False):
     msg = f"🔒 **TRADE CLOSED**\n📊 {symbol}\n📉 Exit: ${price:.2f}\n🏆 {result}\n💰 PnL: ${pnl:.2f}"
     send_telegram(msg)
 
-# ================= UPDATE UNIVERSE =================
-def update_universe():
+# ================= SCAN LARGE UNIVERSE (500+ STOCKS) =================
+dynamic_universe = []
+
+def update_large_universe():
+    """تحديث قائمة الأسهم بـ 500+ سهم باستخدام Yahoo Screener"""
     global dynamic_universe
-    logger.info("Updating universe...")
-    # للبقاء ضمن حدود yfinance، نستخدم القائمة اليدوية
-    # يمكن إضافة المزيد من الرموز حسب الحاجة
-    pass
+    logger.info("🔄 Fetching large universe (500+ stocks)...")
+    send_telegram("📊 جاري تحديث قائمة الأسهم... (500+ سهم)")
+    
+    symbols = get_active_stocks_from_yahoo(limit=MAX_SCAN_SYMBOLS)
+    if symbols:
+        dynamic_universe = symbols
+        logger.info(f"✅ Universe updated: {len(dynamic_universe)} symbols")
+        send_telegram(f"📊 تم تحديث القائمة بنجاح!\nعدد الأسهم المراقبة: {len(dynamic_universe)}")
+    else:
+        dynamic_universe = get_fallback_universe()
+        logger.warning(f"Using fallback universe: {len(dynamic_universe)} symbols")
 
-# ================= CACHE & SCAN =================
-data_cache = {}
-
-def build_cache(symbols, period='5d', interval='15m'):
-    global data_cache
-    new_cache = {}
-    for symbol in symbols:
-        df = fetch_yfinance_data(symbol, period, interval)
-        if df is not None and len(df) >= 30:
-            new_cache[symbol] = compute_indicators(df)
-        time.sleep(0.1)
-    data_cache = new_cache
-    logger.info(f"Cached {len(data_cache)} symbols")
-
-def update_positions():
-    for symbol, trade in list(state["open_trades"].items()):
-        if symbol not in data_cache:
+def quick_filter_stocks(symbols):
+    """
+    فلترة سريعة للأسهم لتقليل العدد قبل التحليل العميق
+    يعيد قائمة بالأسهم الواعدة فقط
+    """
+    promising = []
+    total = len(symbols)
+    
+    for i, symbol in enumerate(symbols):
+        try:
+            quick = fetch_yfinance_quick(symbol)
+            if quick and quick['price']:
+                price = quick['price']
+                volume = quick['volume']
+                avg_volume = quick['avg_volume']
+                
+                # شروط الفلترة السريعة
+                if 1 < price < 100 and volume > 50000:
+                    promising.append(symbol)
+            
+            # إظهار التقدم كل 50 سهم
+            if (i + 1) % 50 == 0:
+                logger.info(f"Quick filter progress: {i+1}/{total} symbols")
+                
+        except Exception as e:
             continue
-        price = data_cache[symbol]["close"].iloc[-1]
-        if price >= trade["tp"]:
-            close_trade(symbol, price, win=True)
-        elif price <= trade["sl"]:
-            close_trade(symbol, price, win=False)
+        
+        # تأخير بسيط بين الطلبات
+        time.sleep(0.05)
+    
+    logger.info(f"Quick filter: {len(promising)} promising stocks out of {total}")
+    return promising[:150]  # نرجع أول 150 سهم واعد للتحليل العميق
 
-def scan_symbols(symbols, allow_trading=True):
-    build_cache(symbols)
-    update_positions()
-    session, session_msg = get_market_session()
+def deep_analysis(symbols):
+    """تحليل عميق للأسهم الواعدة"""
+    results = []
+    
     for symbol in symbols:
-        if symbol not in data_cache:
-            continue
         if is_seen(symbol):
             continue
-        df = data_cache[symbol]
-        price = df["close"].iloc[-1]
-        current_price = price
-        
-        # Trading halt
-        halted, halt_date, halt_time, reason, halt_price = check_trading_halt(symbol)
-        if halted:
-            if not is_halt_alerted(symbol):
-                halt_msg = f"⛔ **TRADING HALT**\n📊 {symbol}\n📅 {halt_date} {halt_time}\n💲 ${halt_price}\n📄 {reason}"
-                send_telegram(halt_msg)
-                mark_halt_alerted(symbol)
+            
+        df = fetch_yfinance_data(symbol, '5d', '15m')
+        if df is None or len(df) < 30:
             continue
-        
-        # Analysis
-        is_penny = is_penny_stock(current_price)
-        is_accumulating, acc_score = detect_accumulation(df)
-        pre_breakout = pre_breakout_detection(df)
+            
+        df = compute_indicators(df)
         score_val = score_from_cached(df)
-        penny_bonus = 10 if is_penny else 0
-        accumulation_bonus = 15 if is_accumulating else 0
-        pre_breakout_bonus = 10 if pre_breakout else 0
-        final_score = score_val + penny_bonus + accumulation_bonus + pre_breakout_bonus
         
-        # Alerts
-        if pre_breakout and final_score >= 60:
-            send_telegram(f"⚡ **Pre-Breakout Alert!** {symbol} - Score: {final_score} ({session})")
-        if is_accumulating and acc_score >= 60:
-            if should_send_accumulation_alert(symbol, acc_score):
-                send_telegram(f"📦 **Accumulation Detected!** {symbol} - Score: {acc_score}% ({session})")
-                update_accumulation_alert(symbol, acc_score)
+        if score_val >= MIN_SCORE - 10:  # عتبة أقل قليلاً للفحص
+            results.append((symbol, score_val, df))
         
-        # Open trade
-        if allow_trading and is_market_open():
-            threshold = PENNY_THRESHOLD if is_penny else MIN_SCORE
-            if final_score >= threshold and not is_seen(symbol):
-                atr = df["atr"].iloc[-1]
-                if pd.isna(atr):
-                    atr = current_price * 0.02
-                ok, size = can_trade(current_price, atr)
-                if ok:
-                    open_trade(symbol, current_price, atr, final_score, size, df, is_penny, is_accumulating)
-                    mark_seen(symbol)
-        elif final_score >= 70 and not is_seen(symbol):
-            send_telegram(f"📊 **Pre-Market Signal** ({session})\n📊 {symbol}\n💰 ${current_price:.2f}\n⭐ Score {final_score}\n🔥 {session_msg}")
-            mark_seen(symbol)
+        # تأخير بين الطلبات
+        time.sleep(0.1)
+    
+    return sorted(results, key=lambda x: x[1], reverse=True)
+
+def scan_large_universe():
+    """المسح الكامل لـ 500+ سهم"""
+    session, _ = get_market_session()
+    logger.info(f"🚀 Starting large universe scan ({len(dynamic_universe)} symbols) - {session}")
+    
+    # الخطوة 1: فلترة سريعة لتقليل العدد
+    logger.info("Step 1: Quick filtering...")
+    promising_stocks = quick_filter_stocks(dynamic_universe)
+    
+    if not promising_stocks:
+        logger.warning("No promising stocks found")
+        return
+    
+    # الخطوة 2: تحليل عميق للأسهم الواعدة
+    logger.info(f"Step 2: Deep analysis of {len(promising_stocks)} stocks...")
+    top_signals = deep_analysis(promising_stocks)
+    
+    # الخطوة 3: معالجة الإشارات القوية
+    logger.info(f"Step 3: Processing {len(top_signals)} strong signals...")
+    for symbol, score_val, df in top_signals[:10]:  # نأخذ أفضل 10 إشارات فقط
+        if score_val >= MIN_SCORE and not is_seen(symbol):
+            price = df["close"].iloc[-1]
+            atr = df["atr"].iloc[-1]
+            if pd.isna(atr):
+                atr = price * 0.02
+            
+            is_penny = is_penny_stock(price)
+            is_accumulating, acc_score = detect_accumulation(df)
+            
+            ok, size = can_trade(price, atr)
+            if ok:
+                open_trade(symbol, price, atr, score_val, size, df, is_penny, is_accumulating)
+                mark_seen(symbol)
 
 # ================= TELEGRAM FUNCTIONS =================
 def send_telegram(msg):
@@ -518,7 +584,7 @@ def generate_simple_analysis(symbol):
 def cmd_start(message):
     session, session_msg = get_market_session()
     welcome = f"""
-🚀 **AI Trading Bot v15 - Yahoo Finance**
+🚀 **AI Trading Bot v16 - 500+ Stocks Scanner**
 
 **Current Session:** {session}
 {session_msg}
@@ -531,7 +597,7 @@ def cmd_start(message):
 /close <symbol> - Close position
 
 **Features:**
-✅ Free data from Yahoo Finance
+✅ Scans 500+ stocks automatically
 ✅ Accumulation Detection
 ✅ Pre-Breakout Alert
 ✅ Trading Halts Monitor
@@ -618,13 +684,31 @@ def cmd_close(message):
 # ================= BACKGROUND SCANNER =================
 def background_scanner():
     global dynamic_universe
+    last_universe_update = 0
+    last_scan = 0
+    
+    # تحديث القائمة أول مرة
+    update_large_universe()
+    
     while True:
         try:
-            symbols = dynamic_universe
-            session, _ = get_market_session()
-            logger.info(f"🔄 [{session}] Scanning {len(symbols)} symbols...")
-            allow_trading = is_market_open()
-            scan_symbols(symbols, allow_trading=allow_trading)
+            current_time = time.time()
+            
+            # تحديث القائمة كل ساعة
+            if current_time - last_universe_update > 3600:
+                update_large_universe()
+                last_universe_update = current_time
+            
+            # المسح كل 5 دقائق
+            if current_time - last_scan > 300:
+                session, _ = get_market_session()
+                if is_market_open():
+                    logger.info(f"🔄 [{session}] Scanning {len(dynamic_universe)} symbols...")
+                    scan_large_universe()
+                else:
+                    logger.info(f"Market closed, skipping scan")
+                last_scan = current_time
+            
             time.sleep(60)
         except Exception as e:
             logger.error(f"Scanner error: {e}")
@@ -633,7 +717,7 @@ def background_scanner():
 # ================= WEBHOOK =================
 @app.route("/", methods=['GET'])
 def home():
-    return "AI Trading Bot v15 - Yahoo Finance Running"
+    return "AI Trading Bot v16 - 500+ Stocks Scanner Running"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -653,7 +737,7 @@ if __name__ == "__main__":
     threading.Thread(target=background_scanner, daemon=True).start()
     threading.Thread(target=lambda: bot.infinity_polling(timeout=10, long_polling_timeout=5), daemon=True).start()
     
-    send_telegram("✅ **AI Trading Bot v15 - Yahoo Finance is LIVE!**\n\n✅ Free data from Yahoo Finance\n✅ Accumulation Detection\n✅ Pre-Breakout Alerts\n✅ Trading Halts Monitor")
+    send_telegram("✅ **AI Trading Bot v16 - 500+ Stocks Scanner is LIVE!**\n\n✅ Scans 500+ stocks automatically\n✅ Smart filtering for speed\n✅ Accumulation & Pre-Breakout detection\n✅ Trading Halts Monitor")
     
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)

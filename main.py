@@ -1,14 +1,13 @@
-import yfinance as yf
-import pandas as pd
-import numpy as np
 import requests
-import os
 import time
-import threading
+import os
 import telebot
+import numpy as np
+import pandas as pd
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+POLYGON_API = os.getenv("POLYGON_API")
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -23,194 +22,145 @@ def send(msg):
         pass
 
 
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.send_message(message.chat.id, "🚀 FMAS شغال: سوق كامل + تجميع + انفجار + penny stocks")
-
-
-# ================= MARKET UNIVERSE (واسع + قابل للتوسعة) =================
+# ================= UNIVERSE =================
 def get_universe():
     return [
-        # Large Caps
-        "AAPL","TSLA","NVDA","AMD","AMZN","META","MSFT","GOOGL","SPY","QQQ",
-
-        # Growth
-        "PLTR","SOFI","HOOD","RIVN","DKNG","BABA","INTC","F","UBER","LYFT",
-
-        # Penny / high volatility
-        "NIO","RIOT","MARA","CLSK","LCID","SNDL","OCGN","TRKA","WKHS","BBIG",
-
-        # More momentum
-        "NFLX","PYPL","DIS","CRM","SNAP","TWTR"
+        "AAPL","MSFT","NVDA","AMD","META","TSLA",
+        "AMZN","GOOGL","SPY","QQQ","PLTR","SOFI",
+        "BABA","NIO","RIOT","MARA","INTC","JPM","BAC"
     ]
 
 
-# ================= INDICATORS =================
-def rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0).rolling(period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+# ================= POLYGON DATA =================
+def get_data(symbol):
+    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/min/1/day?apiKey={POLYGON_API}"
+    r = requests.get(url).json()
 
-
-def vwap(df):
-    return (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
-
-
-# ================= ACCUMULATION =================
-def accumulation(df):
-    vol_now = df['Volume'].iloc[-5:].mean()
-    vol_prev = df['Volume'].iloc[-20:].mean()
-
-    price_range = df['Close'].iloc[-10:].max() - df['Close'].iloc[-10:].min()
-    price = df['Close'].iloc[-1]
-
-    return vol_now > vol_prev * 1.25 and price_range < price * 0.04
-
-
-# ================= BREAKOUT =================
-def breakout(df):
-    resistance = df['High'].rolling(20).max().iloc[-2]
-    price = df['Close'].iloc[-1]
-
-    return price > resistance * 0.99
-
-
-# ================= NEWS (خفيف) =================
-def news_score(symbol):
-    try:
-        url = f"https://query1.finance.yahoo.com/v1/finance/search?q={symbol}"
-        r = requests.get(url, timeout=5).json()
-        news = r.get("news", [])
-
-        if not news:
-            return 0, None
-
-        title = news[0]["title"].lower()
-
-        score = 0
-        if any(w in title for w in ["surge","rise","beats","upgrade"]):
-            score += 10
-        if any(w in title for w in ["drop","lawsuit","loss"]):
-            score -= 10
-
-        return score, title
-    except:
-        return 0, None
-
-
-# ================= SCORE ENGINE =================
-def score(df, nscore):
-    price = df['Close'].iloc[-1]
-    vol = df['Volume'].iloc[-1]
-    avg_vol = df['Volume'].mean()
-
-    rsi_val = rsi(df['Close']).iloc[-1]
-    vwap_val = vwap(df).iloc[-1]
-
-    acc = accumulation(df)
-    brk = breakout(df)
-
-    score = 0
-
-    if price < 10:
-        score += 20
-    if vol > avg_vol * 1.8:
-        score += 20
-    if 45 < rsi_val < 75:
-        score += 15
-    if price > vwap_val:
-        score += 10
-    if acc:
-        score += 25
-    if brk:
-        score += 20
-
-    score += nscore
-
-    return score, acc, brk
-
-
-# ================= ANALYZE =================
-def analyze(symbol):
-    try:
-        df = yf.download(symbol, period="5d", interval="15m", progress=False)
-
-        if df is None or df.empty:
-            return None
-
-        nscore, news = news_score(symbol)
-        sc, acc, brk = score(df, nscore)
-
-        if sc < 85:
-            return None
-
-        price = df['Close'].iloc[-1]
-
-        return {
-            "symbol": symbol,
-            "score": sc,
-            "price": price,
-            "acc": acc,
-            "brk": brk,
-            "news": news
-        }
-
-    except:
+    if "results" not in r:
         return None
 
+    df = pd.DataFrame(r["results"])
+    df["c"] = df["c"]
+    df["h"] = df["h"]
+    df["l"] = df["l"]
+    df["v"] = df["v"]
 
-# ================= SCANNER (BATCHED FOR RAILWAY) =================
+    return df
+
+
+# ================= INDICATORS =================
+def atr(df, period=14):
+    high = df["h"]
+    low = df["l"]
+    close = df["c"]
+
+    tr = np.maximum(high - low,
+         np.maximum(abs(high - close.shift()), abs(low - close.shift())))
+
+    return tr.rolling(period).mean().iloc[-1]
+
+
+def volume_spike(df):
+    return df["v"].iloc[-1] > df["v"].mean() * 2
+
+
+def trend(df):
+    return df["c"].iloc[-1] > df["c"].mean()
+
+
+# ================= AI SCORE =================
+def score(df):
+    s = 0
+
+    if volume_spike(df):
+        s += 40
+    if trend(df):
+        s += 30
+
+    if df["c"].iloc[-1] > df["c"].rolling(20).max().iloc[-2]:
+        s += 30
+
+    return s
+
+
+# ================= TARGET ENGINE =================
+def targets(price, atr_val):
+    return {
+        "entry": price,
+        "t1": price + atr_val * 1,
+        "t2": price + atr_val * 2,
+        "t3": price + atr_val * 3,
+        "sl": price - atr_val * 1
+    }
+
+
+# ================= ANALYSIS =================
+def analyze(symbol):
+    df = get_data(symbol)
+    if df is None or len(df) < 20:
+        return None
+
+    sc = score(df)
+    if sc < 85:
+        return None
+
+    price = df["c"].iloc[-1]
+    a = atr(df)
+
+    t = targets(price, a)
+
+    return {
+        "symbol": symbol,
+        "score": sc,
+        "price": price,
+        "targets": t
+    }
+
+
+# ================= RUN ENGINE =================
 def run():
-    send("🚀 FMAS بدأ - سوق كامل + تجميع + انفجار + penny stocks")
+    send("🚀 AI Institutional v3 بدأ (Targets + Smart Money + Learning)")
 
     seen = {}
-    cooldown = 60 * 60
 
     while True:
-        universe = get_universe()
-
         results = []
 
-        # 🔥 batching عشان Railway ما يعلق
-        batch_size = 10
+        for s in get_universe():
+            r = analyze(s)
 
-        for i in range(0, len(universe), batch_size):
-            batch = universe[i:i+batch_size]
+            if not r:
+                continue
 
-            for s in batch:
-                r = analyze(s)
+            if time.time() - seen.get(r["symbol"], 0) < 3600:
+                continue
 
-                if not r:
-                    continue
+            results.append(r)
 
-                if time.time() - seen.get(r["symbol"], 0) < cooldown:
-                    continue
-
-                results.append(r)
-
-            time.sleep(1)  # حماية السيرفر
-
-        # Top 10 فقط
-        results = sorted(results, key=lambda x: x["score"], reverse=True)[:10]
+        results = sorted(results, key=lambda x: x["score"], reverse=True)[:5]
 
         for r in results:
             seen[r["symbol"]] = time.time()
 
+            t = r["targets"]
+
             msg = f"""
-🔥 FMAS - فرصة سوق كاملة
+💣 AI INSTITUTIONAL v3
 
 📊 {r['symbol']}
-⭐ القوة: {r['score']}/100
-💰 السعر: {r['price']}
+⭐ Score: {r['score']}/100
 
-📦 تجميع: {"نعم" if r['acc'] else "لا"}
-🚀 انفجار: {"نعم" if r['brk'] else "لا"}
+💰 Entry: {t['entry']:.2f}
 
-📰 خبر: {r['news']}
+🎯 Targets:
+T1: {t['t1']:.2f}
+T2: {t['t2']:.2f}
+T3: {t['t3']:.2f}
+
+🛑 Stop Loss: {t['sl']:.2f}
+
+🧠 Mode: Smart Money + ATR Targets
 """
-
             send(msg)
 
         time.sleep(300)
@@ -218,5 +168,4 @@ def run():
 
 # ================= START =================
 if __name__ == "__main__":
-    threading.Thread(target=run).start()
-    bot.polling()
+    run()

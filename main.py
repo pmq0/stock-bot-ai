@@ -23,25 +23,23 @@ STATE_DIR = os.getenv("STATE_DIR", ".")
 # Trading Parameters
 CAPITAL = 10000.0
 RISK_PER_TRADE = 0.02
-MAX_OPEN_TRADES = 8
+MAX_OPEN_TRADES = 5
 MIN_SCORE_REGULAR = 70
 MIN_SCORE_PENNY = 75
 SIGNAL_COOLDOWN = 3600
 DAILY_LOSS_LIMIT = 300.0
-STATE_FILE = os.path.join(STATE_DIR, "state_v31.json")
-SCAN_INTERVAL_SEC = 1200  # 20 minutes (أقل ضغط)
+STATE_FILE = os.path.join(STATE_DIR, "state_v33.json")
+SCAN_INTERVAL_SEC = 1800  # 30 minutes
 TRADE_MONITOR_INTERVAL = 120
 
-# Strategy Parameters
 TP_PCT = 1.05
 SL_PCT = 0.97
 
-# Fast Filter Thresholds (أكثر صرامة لتقليل الضغط)
+# Fast Filter Thresholds
 MIN_PRICE = 2.0
 MAX_PRICE = 100.0
 MIN_VOLUME = 100000
 
-# ================= MARKET PHASE SETTINGS =================
 PHASE_SETTINGS = {
     "PRE": {"min_score": 80, "size_multiplier": 0.5, "vol_surge_mult": 2.5, "description": "🟡 Pre-Market"},
     "REGULAR": {"min_score": 70, "size_multiplier": 1.0, "vol_surge_mult": 2.0, "description": "🟢 Regular Hours"},
@@ -55,7 +53,6 @@ logger = logging.getLogger()
 app = Flask(__name__)
 bot = telebot.TeleBot(TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
 
-# ================= STATE MANAGEMENT =================
 state_lock = threading.RLock()
 state = {
     "open_trades": {},
@@ -105,10 +102,9 @@ def reset_daily_loss_if_needed():
             state["last_reset"] = today
             save_state()
 
-# ================= TICKER DISCOVERY (كل الأسهم) =================
 def update_all_tickers():
     try:
-        logger.info("Fetching ALL tickers from NASDAQ FTP...")
+        logger.info("Fetching tickers from NASDAQ FTP...")
         ftp = ftplib.FTP("ftp.nasdaqtrader.com")
         ftp.login()
         ftp.cwd("SymbolDirectory")
@@ -127,15 +123,16 @@ def update_all_tickers():
         tickers.extend(df_other["NASDAQ Symbol"].dropna().tolist())
         ftp.quit()
         
-        clean_tickers = [t for t in tickers if str(t).isalpha() and len(str(t)) <= 5]
-        clean_tickers = list(dict.fromkeys(clean_tickers))
+        # ✅ التعديل: 100 سهم فقط
+        clean_tickers = [t for t in tickers if str(t).isalpha() and 2 <= len(str(t)) <= 4]
+        clean_tickers = list(dict.fromkeys(clean_tickers))[:100]
         
         with state_lock:
             state["tickers"] = clean_tickers
             state["last_ticker_update"] = datetime.now().isoformat()
             save_state()
             
-        logger.info(f"✅ Full universe: {len(clean_tickers)} symbols")
+        logger.info(f"✅ Universe: {len(clean_tickers)} symbols")
         return clean_tickers
     except Exception as e:
         logger.error(f"Ticker update error: {e}")
@@ -267,7 +264,6 @@ def update_trades():
                 elif price <= trade["sl"]: close_trade(symbol, price, "STOP LOSS")
         except: pass
 
-# ================= SCANNER ENGINE (مخفف) =================
 def background_scanner():
     while True:
         try:
@@ -278,30 +274,25 @@ def background_scanner():
                         update_all_tickers()
                     tickers = list(state["tickers"])
                 
-                chunk_size = 200
-                total_chunks = (len(tickers) + chunk_size - 1) // chunk_size
-                
+                chunk_size = 50
                 for i in range(0, len(tickers), chunk_size):
                     chunk = tickers[i:i+chunk_size]
                     
-                    # فلترة سريعة
                     filtered = []
-                    with ThreadPoolExecutor(max_workers=6) as executor:
+                    with ThreadPoolExecutor(max_workers=3) as executor:
                         future_to_sym = {executor.submit(fast_filter, sym): sym for sym in chunk}
                         for future in as_completed(future_to_sym):
                             if future.result():
                                 filtered.append(future_to_sym[future])
                     
-                    # تحليل عميق
                     if filtered:
-                        with ThreadPoolExecutor(max_workers=4) as executor:
+                        with ThreadPoolExecutor(max_workers=2) as executor:
                             executor.map(process_symbol, filtered)
                     
-                    # تحرير الذاكرة
                     gc.collect()
                     time.sleep(5)
                 
-                logger.info(f"✅ Scan complete: {len(tickers)} stocks processed")
+                logger.info(f"✅ Scan complete: {len(tickers)} stocks")
             time.sleep(SCAN_INTERVAL_SEC)
         except Exception as e:
             logger.error(f"Scanner error: {e}")
@@ -316,31 +307,38 @@ def background_monitor():
         except: pass
 
 def generate_analysis_message(symbol):
-    try:
-        df = yf.download(symbol, period="10d", interval="15m", progress=False)
-        if df.empty: return f"⚠️ No data for {symbol}"
-        df.columns = [c.lower() for c in df.columns]
-        df = compute_indicators(df)
-        last = df.iloc[-1]
-        phase = get_market_phase()
-        settings = PHASE_SETTINGS.get(phase, PHASE_SETTINGS["REGULAR"])
-        vol_surge = last['volume'] > df['vol_ma'].iloc[-1] * 2.0
-        price_break = last['close'] > df['high'].iloc[-20:-1].max()
-        score = 0
-        if vol_surge: score += 40
-        if price_break: score += 40
-        if 40 < last['rsi'] < 70: score += 10
-        if last['ema9'] > last['ema21']: score += 10
-        msg = f"📊 *{symbol} Analysis*\n💰 Price: ${last['close']:.2f}\n📊 Volume: {int(last['volume']):,}\n⚡ RSI: {last['rsi']:.1f}\n🧠 Score: {score}/{settings['min_score']}\n🕐 Phase: {phase}"
-        return msg
-    except Exception as e:
-        return f"⚠️ Error: {e}"
+    for attempt in range(2):
+        try:
+            df = yf.download(symbol, period="10d", interval="15m", progress=False)
+            if df.empty:
+                if attempt == 0:
+                    time.sleep(1)
+                    continue
+                return f"⚠️ No data for {symbol}"
+            df.columns = [c.lower() for c in df.columns]
+            df = compute_indicators(df)
+            last = df.iloc[-1]
+            phase = get_market_phase()
+            settings = PHASE_SETTINGS.get(phase, PHASE_SETTINGS["REGULAR"])
+            vol_surge = last['volume'] > df['vol_ma'].iloc[-1] * 2.0
+            price_break = last['close'] > df['high'].iloc[-20:-1].max()
+            score = 0
+            if vol_surge: score += 40
+            if price_break: score += 40
+            if 40 < last['rsi'] < 70: score += 10
+            if last['ema9'] > last['ema21']: score += 10
+            msg = f"📊 *{symbol} Analysis*\n💰 Price: ${last['close']:.2f}\n📊 Volume: {int(last['volume']):,}\n⚡ RSI: {last['rsi']:.1f}\n🧠 Score: {score}/{settings['min_score']}\n🕐 Phase: {phase}"
+            return msg
+        except Exception as e:
+            if attempt == 0:
+                time.sleep(1)
+                continue
+            return f"❌ Error: {e}"
 
-# ================= TELEGRAM HANDLERS =================
 if bot:
     @bot.message_handler(commands=['start'])
     def cmd_start(message):
-        welcome = "🚀 *AI Trading Bot V31 - Full Universe*\n📊 ALL NASDAQ/NYSE/AMEX stocks\n🛡️ Optimized for Yahoo\n\n/status - Bot status\n/positions - Open trades\n/scan <symbol> - Analyze\n/close <symbol> - Close trade"
+        welcome = "🚀 *AI Trading Bot V33 - Stable*\n📊 100 active stocks\n\n/status - Bot status\n/positions - Open trades\n/scan <symbol> - Analyze\n/close <symbol> - Close trade"
         bot.reply_to(message, welcome, parse_mode='Markdown')
 
     @bot.message_handler(commands=['status'])
@@ -351,7 +349,7 @@ if bot:
             perf = state["performance"]
             total = perf["wins"] + perf["losses"]
             wr = (perf["wins"] / total * 100) if total > 0 else 0
-            msg = f"📊 *Bot Status (V31)*\n🕐 Phase: {phase}\n✅ Wins: {perf['wins']}\n❌ Losses: {perf['losses']}\n📈 Win Rate: {wr:.1f}%\n💵 PnL: ${perf['total_pnl']:+.2f}\n📦 Open: {len(state['open_trades'])}/{MAX_OPEN_TRADES}\n📉 Daily Loss: ${state.get('daily_loss', 0):.2f}\n🌐 Universe: {len(state['tickers'])} stocks"
+            msg = f"📊 *Bot Status (V33)*\n🕐 Phase: {phase}\n✅ Wins: {perf['wins']}\n❌ Losses: {perf['losses']}\n📈 Win Rate: {wr:.1f}%\n💵 PnL: ${perf['total_pnl']:+.2f}\n📦 Open: {len(state['open_trades'])}/{MAX_OPEN_TRADES}\n📉 Daily Loss: ${state.get('daily_loss', 0):.2f}\n🌐 Universe: {len(state['tickers'])} stocks"
         bot.reply_to(message, msg, parse_mode='Markdown')
 
     @bot.message_handler(commands=['positions'])
@@ -380,13 +378,14 @@ if bot:
         symbol = parts[1].upper()
         with state_lock:
             if symbol not in state["open_trades"]: bot.reply_to(message, f"📭 No open trade for {symbol}"); return
-        df = yf.download(symbol, period='1d', interval='5m', progress=False)
-        if df.empty: bot.reply_to(message, f"⚠️ Cannot fetch price"); return
-        price = df['Close'].iloc[-1]
-        close_trade(symbol, price, "MANUAL")
-        bot.reply_to(message, f"✅ Closed {symbol} at ${price:.2f}")
+        try:
+            df = yf.download(symbol, period='1d', interval='5m', progress=False)
+            if df.empty: bot.reply_to(message, f"⚠️ Cannot fetch price"); return
+            price = df['Close'].iloc[-1]
+            close_trade(symbol, price, "MANUAL")
+            bot.reply_to(message, f"✅ Closed {symbol} at ${price:.2f}")
+        except: bot.reply_to(message, f"❌ Error closing {symbol}")
 
-# ================= MAIN =================
 if __name__ == "__main__":
     load_state()
     reset_daily_loss_if_needed()
@@ -396,7 +395,7 @@ if __name__ == "__main__":
     
     if bot:
         threading.Thread(target=lambda: bot.infinity_polling(), daemon=True).start()
-        send_telegram("✅ *Bot V31 Started - FULL UNIVERSE*\n📊 ALL NASDAQ/NYSE/AMEX stocks\n🛡️ Optimized for Yahoo Finance")
+        send_telegram("✅ *Bot V33 Started - STABLE MODE*\n📊 100 active stocks\n✅ /scan, /status, /positions, /close")
     
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)

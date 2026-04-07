@@ -10,42 +10,71 @@ from datetime import datetime, timedelta
 from flask import Flask, request
 import telebot
 import pytz
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import yfinance as yf
+import ftplib
 import io
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import re
-import xml.etree.ElementTree as ET
-from collections import deque
 
 # ================= CONFIGURATION =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+STATE_DIR = os.getenv("STATE_DIR", ".")
 
-if not TELEGRAM_TOKEN or not CHAT_ID:
-    print("⚠️ Missing TELEGRAM_TOKEN or CHAT_ID")
-
+# Trading Parameters
 CAPITAL = 10000.0
-RISK_PER_TRADE = 0.02
-MAX_OPEN_TRADES = 5
-DAILY_LOSS_LIMIT = 200.0
-
-# --- FIX: Scoring thresholds separated for penny vs regular ---
-MIN_SCORE_REGULAR = 75
-MIN_SCORE_PENNY = 80          # Penny stocks require higher confidence
+RISK_PER_TRADE = 0.02  # 2% risk per trade
+MAX_OPEN_TRADES = 15
 SIGNAL_COOLDOWN = 3600
-STATE_FILE = "state.json"
-MAX_SCAN_SYMBOLS = 150
+DAILY_LOSS_LIMIT = 300.0
+STATE_FILE = os.path.join(STATE_DIR, "state_v28.json")
+SCAN_INTERVAL_SEC = 300  # 5 minutes
+TRADE_MONITOR_INTERVAL = 60
 
-plt.style.use('dark_background')
+# Strategy Parameters
+TP_PCT = 1.05  # 5% Target
+SL_PCT = 0.97  # 3% Stop Loss
+
+# Fast Filter Thresholds
+MIN_PRICE = 1.0
+MAX_PRICE = 200.0
+MIN_VOLUME = 200000
+
+# ================= MARKET PHASE SETTINGS =================
+PHASE_SETTINGS = {
+    "PRE": {
+        "min_score": 80,
+        "size_multiplier": 0.5,
+        "vol_surge_mult": 2.5,
+        "description": "🟡 Pre-Market - High risk, low liquidity"
+    },
+    "REGULAR": {
+        "min_score": 70,
+        "size_multiplier": 1.0,
+        "vol_surge_mult": 2.0,
+        "description": "🟢 Regular Hours - Normal trading"
+    },
+    "AFTER": {
+        "min_score": 85,
+        "size_multiplier": 0.3,
+        "vol_surge_mult": 3.0,
+        "description": "🔵 After-Hours - Very high risk"
+    },
+    "CLOSED": {
+        "min_score": 999,
+        "size_multiplier": 0,
+        "vol_surge_mult": 0,
+        "description": "⚫ Market Closed"
+    }
+}
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("bot.log"),
+        logging.FileHandler("bot_v28.log"),
         logging.StreamHandler()
     ]
 )
@@ -53,41 +82,44 @@ logger = logging.getLogger()
 
 app = Flask(__name__)
 bot = telebot.TeleBot(TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None
-executor = ThreadPoolExecutor(max_workers=3)
 
-# ================= STATE =================
+# ================= STATE MANAGEMENT =================
 state_lock = threading.RLock()
-
-# --- FIX: cache_lock added to protect data_cache ---
-cache_lock = threading.RLock()
-data_cache = {}
-
 state = {
     "open_trades": {},
-    "performance": {},
-    "weights": {
-        "trend":     20,
-        "rsi":       15,
-        "volume":    15,
-        "obv":       10,
-        "breakout":  15,
-        "macd":      10,   # NEW
-        "bb_pos":    10,   # NEW: Bollinger Band position
-        "adx":        5,   # NEW: trend strength
-    },
-    "seen_signals":       {},
-    "halted_alerts":      {},
-    "last_accumulation":  {},
-    "daily_loss":         0.0,
-    "last_reset":         None,
-    "backtest_results":   {},   # NEW
-    "equity_curve":       [],   # NEW
+    "performance": {"wins": 0, "losses": 0, "total_pnl": 0.0},
+    "seen_signals": {},
+    "last_accumulation": {},
+    "daily_loss": 0.0,
+    "last_reset": None,
+    "tickers": [],
+    "last_ticker_update": None,
+    "backtest_results": {}
 }
+
+EASTERN_TZ = pytz.timezone("US/Eastern")
+
+def now_est() -> datetime:
+    return datetime.now(EASTERN_TZ)
+
+def get_market_phase():
+    now = now_est()
+    hour = now.hour
+    weekday = now.weekday()
+    if weekday >= 5: return "CLOSED"
+    if 4 <= hour < 9: return "PRE"
+    elif 9 <= hour < 16: return "REGULAR"
+    elif 16 <= hour < 20: return "AFTER"
+    else: return "CLOSED"
+
+def is_market_open():
+    return get_market_phase() == "REGULAR"
 
 def save_state():
     with state_lock:
         try:
-            with open(STATE_FILE, "w") as f:
+            os.makedirs(os.path.dirname(STATE_FILE) or ".", exist_ok=True)
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
                 json.dump(state, f, indent=2, default=str)
         except Exception as e:
             logger.error(f"Save state error: {e}")
@@ -96,484 +128,146 @@ def load_state():
     global state
     if os.path.exists(STATE_FILE):
         try:
-            with open(STATE_FILE, "r") as f:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
-                with state_lock:
-                    state.update(loaded)
+            with state_lock:
+                state.update(loaded)
             logger.info("State loaded successfully")
         except Exception as e:
             logger.error(f"Failed to load state: {e}")
 
 def reset_daily_loss_if_needed():
-    today = datetime.now().date().isoformat()
+    today = now_est().date().isoformat()
     with state_lock:
-        if state["last_reset"] != today:
+        if state.get("last_reset") != today:
             state["daily_loss"] = 0.0
             state["last_reset"] = today
             save_state()
 
-# ================= UNIVERSE =================
-large_universe = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "BRK-B", "LLY", "JPM",
-    "V",    "XOM",  "UNH",  "WMT",  "PG",   "JNJ",   "MA",   "HD",    "CVX", "BAC",
-    "KO",   "PEP",  "COST", "ADBE", "CRM",  "NFLX",  "DIS",  "AMD",   "INTC","CMCSA",
-    "PFE",  "TMO",  "ABT",  "DHR",  "NKE",  "LIN",   "UPS",  "SBUX",  "LOW", "RTX",
-    "HON",  "CAT",  "GS",   "MS",   "C",    "WFC",   "SPGI", "BLK",   "AXP", "BK",
-    "DE",   "GE",   "MMM",  "AMGN", "TXN",  "QCOM",  "MU",   "ADI",   "NXPI","MRVL",
-    "LRCX", "KLAC", "AMAT", "ON",   "PLTR", "SNOW",  "NET",  "DDOG",  "ZS",  "MDB",
-    "CRWD", "PANW", "OKTA", "DOCU", "TEAM", "ROKU",  "SHOP", "SQ",    "AFRM","UPST",
-    "SOFI", "PYPL", "UBER", "LYFT", "DASH", "ABNB",  "RBLX", "GME",   "AMC", "BB",
-    "NIO",  "RIVN", "LCID", "PLUG", "RIOT", "MARA",  "CLSK", "COIN",  "HOOD","BA",
-    "LMT",  "NOC",
-]
-dynamic_universe = large_universe[:MAX_SCAN_SYMBOLS]
-
-# ================= DATA ENGINE =================
-def fetch_yfinance_data(symbol: str, period: str = '5d', interval: str = '15m') -> pd.DataFrame | None:
-    """Fetch OHLCV data with retry logic."""
-    for attempt in range(3):
-        try:
-            ticker = yf.Ticker(symbol)
-            df = ticker.history(period=period, interval=interval, auto_adjust=True)
-            if df.empty:
-                return None
-            df = df.rename(columns={
-                'Open': 'open', 'High': 'high',
-                'Low': 'low', 'Close': 'close', 'Volume': 'volume'
-            })
-            df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
-            df.dropna(inplace=True)
-            return df
-        except Exception as e:
-            if attempt == 2:
-                logger.warning(f"fetch_yfinance_data failed for {symbol}: {e}")
-            time.sleep(0.5 * (attempt + 1))
-    return None
-
-def fetch_yfinance_quick(symbol: str) -> dict | None:
-    """Lightweight fetch for pre-filter."""
+# ================= TICKER DISCOVERY =================
+def update_all_tickers():
     try:
-        ticker = yf.Ticker(symbol)
-        data = ticker.history(period='5d')
-        if data.empty or len(data) < 2:
-            return None
-        return {
-            'price':      float(data['Close'].iloc[-1]),
-            'volume':     float(data['Volume'].iloc[-1]),
-            'avg_volume': float(data['Volume'].mean()),
-            'change_pct': float((data['Close'].iloc[-1] - data['Close'].iloc[-2]) / data['Close'].iloc[-2] * 100),
-        }
-    except Exception:
-        return None
-
-# ================= INDICATORS =================
-def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
-    # EMA
-    df["ema9"]  = df["close"].ewm(span=9,  adjust=False).mean()
-    df["ema21"] = df["close"].ewm(span=21, adjust=False).mean()
-    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()   # NEW
-
-    # RSI
-    delta = df["close"].diff()
-    gain  = delta.clip(lower=0).rolling(14).mean()
-    loss  = (-delta.clip(upper=0)).rolling(14).mean()
-    rs    = gain / (loss + 1e-9)
-    df["rsi"] = 100 - (100 / (1 + rs))
-
-    # ATR
-    df["tr"]  = np.maximum(
-        df["high"] - df["low"],
-        np.maximum(
-            abs(df["high"] - df["close"].shift(1)),
-            abs(df["low"]  - df["close"].shift(1))
-        )
-    )
-    df["atr"] = df["tr"].rolling(14).mean()
-
-    # OBV
-    obv = [0.0]
-    for i in range(1, len(df)):
-        if df["close"].iloc[i] > df["close"].iloc[i - 1]:
-            obv.append(obv[-1] + df["volume"].iloc[i])
-        elif df["close"].iloc[i] < df["close"].iloc[i - 1]:
-            obv.append(obv[-1] - df["volume"].iloc[i])
-        else:
-            obv.append(obv[-1])
-    df["obv"]    = obv
-    df["obv_ma"] = pd.Series(obv, index=df.index).rolling(10).mean()  # NEW
-
-    # Volume MA
-    df["vol_ma"] = df["volume"].rolling(20).mean()
-
-    # Bollinger Bands
-    df["sma"]        = df["close"].rolling(20).mean()
-    df["std"]        = df["close"].rolling(20).std()
-    df["upper_band"] = df["sma"] + (df["std"] * 2)
-    df["lower_band"] = df["sma"] - (df["std"] * 2)
-    df["bandwidth"]  = (df["upper_band"] - df["lower_band"]) / (df["sma"] + 1e-9)
-    df["bb_pct"]     = (df["close"] - df["lower_band"]) / (df["upper_band"] - df["lower_band"] + 1e-9)  # NEW
-
-    # MACD (NEW)
-    ema12        = df["close"].ewm(span=12, adjust=False).mean()
-    ema26        = df["close"].ewm(span=26, adjust=False).mean()
-    df["macd"]   = ema12 - ema26
-    df["signal"] = df["macd"].ewm(span=9, adjust=False).mean()
-    df["macd_hist"] = df["macd"] - df["signal"]
-
-    # ADX (NEW) — simplified
-    plus_dm  = df["high"].diff().clip(lower=0)
-    minus_dm = (-df["low"].diff()).clip(lower=0)
-    tr_smooth   = df["tr"].rolling(14).mean()
-    plus_di  = 100 * plus_dm.rolling(14).mean()  / (tr_smooth + 1e-9)
-    minus_di = 100 * minus_dm.rolling(14).mean() / (tr_smooth + 1e-9)
-    dx       = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)
-    df["adx"] = dx.rolling(14).mean()
-
-    return df
-
-# ================= SCORING ENGINE (IMPROVED) =================
-def score_signal(df: pd.DataFrame) -> tuple[int, dict]:
-    """
-    Returns (total_score 0-100, breakdown dict).
-    Each component is independent so we can inspect what fired.
-    """
-    if df is None or len(df) < 50:
-        return 0, {}
-
-    c   = df.iloc[-1]
-    c_5 = df.iloc[-5] if len(df) > 5 else c
-
-    with state_lock:
-        w = state["weights"].copy()
-
-    breakdown = {}
-    score = 0
-
-    # 1. Trend: EMA alignment (9 > 21 > 50)
-    if c["ema9"] > c["ema21"] > c["ema50"]:
-        breakdown["trend"] = w["trend"]
-        score += w["trend"]
-    elif c["ema9"] > c["ema21"]:
-        breakdown["trend"] = w["trend"] // 2
-        score += w["trend"] // 2
-
-    # 2. RSI: momentum zone 52–68 (avoid overbought)
-    if 52 < c["rsi"] < 68:
-        breakdown["rsi"] = w["rsi"]
-        score += w["rsi"]
-    elif 48 < c["rsi"] <= 52:
-        breakdown["rsi"] = w["rsi"] // 3
-        score += w["rsi"] // 3
-
-    # 3. Volume surge
-    if c["volume"] > c["vol_ma"] * 1.5:
-        breakdown["volume"] = w["volume"]
-        score += w["volume"]
-    elif c["volume"] > c["vol_ma"] * 1.2:
-        breakdown["volume"] = w["volume"] // 2
-        score += w["volume"] // 2
-
-    # 4. OBV rising vs its own MA
-    if c["obv"] > c["obv_ma"]:
-        breakdown["obv"] = w["obv"]
-        score += w["obv"]
-
-    # 5. Breakout: close above 20-period high
-    recent_high = df["high"].iloc[-20:-1].max()
-    if c["close"] > recent_high:
-        breakdown["breakout"] = w["breakout"]
-        score += w["breakout"]
-
-    # 6. MACD bullish crossover
-    prev_hist = df["macd_hist"].iloc[-2]
-    if c["macd_hist"] > 0 and prev_hist <= 0:        # fresh cross
-        breakdown["macd"] = w["macd"]
-        score += w["macd"]
-    elif c["macd_hist"] > 0 and c["macd"] > 0:       # already above
-        breakdown["macd"] = w["macd"] // 2
-        score += w["macd"] // 2
-
-    # 7. Bollinger Band position (0.5–0.8 = healthy uptrend, not overextended)
-    if 0.5 < c["bb_pct"] < 0.8:
-        breakdown["bb_pos"] = w["bb_pos"]
-        score += w["bb_pos"]
-
-    # 8. ADX: trend strength > 25
-    if c["adx"] > 25:
-        breakdown["adx"] = w["adx"]
-        score += w["adx"]
-    elif c["adx"] > 20:
-        breakdown["adx"] = w["adx"] // 2
-        score += w["adx"] // 2
-
-    # Penalty: RSI overbought
-    if c["rsi"] > 75:
-        score = int(score * 0.7)
-        breakdown["penalty_overbought"] = True
-
-    # Penalty: price below EMA50 (weak trend)
-    if c["close"] < c["ema50"]:
-        score = int(score * 0.8)
-        breakdown["penalty_below_ema50"] = True
-
-    return min(100, max(0, score)), breakdown
-
-# ================= PENNY STOCK =================
-def is_penny_stock(price: float) -> bool:
-    return price < 5.0
-
-# ================= ACCUMULATION =================
-def detect_accumulation(df: pd.DataFrame) -> tuple[bool, int]:
-    if len(df) < 30:
-        return False, 0
-
-    last_10 = df.tail(10)
-    last_20 = df.tail(20)
-
-    price_change  = abs((df['close'].iloc[-1] - df['close'].iloc[-20]) / (df['close'].iloc[-20] + 1e-9))
-    price_stable  = price_change < 0.015
-    volume_surge  = last_10['volume'].mean() > last_20['volume'].mean() * 1.2
-    obv_rising    = df['obv'].iloc[-1] > df['obv'].iloc[-10]
-    recent_range  = (last_10['high'].max() - last_10['low'].min()) / (df['close'].iloc[-1] + 1e-9)
-    tight_range   = recent_range < 0.04
-
-    acc_score = 0
-    if price_stable: acc_score += 25
-    if volume_surge: acc_score += 30
-    if obv_rising:   acc_score += 25
-    if tight_range:  acc_score += 20
-
-    return acc_score >= 60, acc_score
-
-def pre_breakout_detection(df: pd.DataFrame) -> bool:
-    if len(df) < 20:
-        return False
-    is_squeezing  = df['bandwidth'].iloc[-1] < df['bandwidth'].iloc[-10] * 0.7
-    approaching   = df['close'].iloc[-1] > df['upper_band'].iloc[-1] * 0.97
-    volume_surge  = df['volume'].iloc[-3:].mean() > df['volume'].rolling(20).mean().iloc[-1] * 1.5
-    return is_squeezing and approaching and volume_surge
-
-# ================= BACKTESTING (NEW) =================
-def simple_backtest(symbol: str, df: pd.DataFrame) -> dict:
-    """
-    Walk-forward backtest on historical data.
-    Returns summary stats to validate the strategy before going live.
-    """
-    if df is None or len(df) < 80:
-        return {}
-
-    trades      = []
-    in_trade    = False
-    entry_price = 0.0
-    entry_idx   = 0
-    tp_mult     = 2.0
-    sl_mult     = 2.0
-
-    for i in range(50, len(df)):
-        window = df.iloc[:i]
-        score_val, _ = score_signal(window)
-        price = df['close'].iloc[i]
-        atr   = df['atr'].iloc[i]
-        if pd.isna(atr) or atr == 0:
-            continue
-
-        if not in_trade and score_val >= MIN_SCORE_REGULAR:
-            entry_price = price
-            tp_price    = price + atr * tp_mult
-            sl_price    = price - atr * sl_mult
-            in_trade    = True
-            entry_idx   = i
-
-        elif in_trade:
-            if price >= tp_price:
-                trades.append({"pnl": tp_price - entry_price, "bars": i - entry_idx, "result": "win"})
-                in_trade = False
-            elif price <= sl_price:
-                trades.append({"pnl": sl_price - entry_price, "bars": i - entry_idx, "result": "loss"})
-                in_trade = False
-            # Max hold: 20 bars
-            elif i - entry_idx >= 20:
-                trades.append({"pnl": price - entry_price, "bars": 20, "result": "timeout"})
-                in_trade = False
-
-    if not trades:
-        return {"total_trades": 0, "win_rate": 0, "avg_pnl": 0}
-
-    wins     = sum(1 for t in trades if t["result"] == "win")
-    total    = len(trades)
-    avg_pnl  = sum(t["pnl"] for t in trades) / total
-    win_rate = wins / total * 100
-
-    return {
-        "symbol":       symbol,
-        "total_trades": total,
-        "wins":         wins,
-        "losses":       total - wins,
-        "win_rate":     round(win_rate, 1),
-        "avg_pnl":      round(avg_pnl, 4),
-        "profitable":   avg_pnl > 0,
-    }
-
-# ================= TRADING HALTS =================
-def check_trading_halt(symbol: str) -> tuple:
-    try:
-        rss_url  = "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts"
-        response = requests.get(rss_url, timeout=10)
-        if response.status_code == 200:
-            root = ET.fromstring(response.content)
-            for item in root.findall('.//item'):
-                title       = item.find('title').text or ''
-                description = item.find('description').text or ''
-                if symbol in title or symbol in description:
-                    price_match  = re.search(r'PauseThresholdPrice:\s*\$?([0-9]+\.[0-9]+)', description)
-                    halt_price   = price_match.group(1) if price_match else "N/A"
-                    time_match   = re.search(r'(\d{1,2}:\d{2}:\d{2})\s*ET', description)
-                    halt_time    = time_match.group(1) if time_match else "N/A"
-                    reason_match = re.search(r'Reason:\s*(.+?)(?:\.|$)', description)
-                    reason       = reason_match.group(1) if reason_match else "Trading Pause"
-                    return True, datetime.now().strftime('%Y-%m-%d'), halt_time, reason, halt_price
+        logger.info("Fetching latest ticker list from NASDAQ FTP...")
+        ftp = ftplib.FTP("ftp.nasdaqtrader.com")
+        ftp.login()
+        ftp.cwd("SymbolDirectory")
+        tickers = []
+        r_nasdaq = io.BytesIO()
+        ftp.retrbinary("RETR nasdaqlisted.txt", r_nasdaq.write)
+        r_nasdaq.seek(0)
+        df_nasdaq = pd.read_csv(r_nasdaq, sep="|")
+        tickers.extend(df_nasdaq["Symbol"].dropna().tolist())
+        r_other = io.BytesIO()
+        ftp.retrbinary("RETR otherlisted.txt", r_other.write)
+        r_other.seek(0)
+        df_other = pd.read_csv(r_other, sep="|")
+        tickers.extend(df_other["NASDAQ Symbol"].dropna().tolist())
+        ftp.quit()
+        clean_tickers = sorted(list(set([t for t in tickers if str(t).isalpha() and len(str(t)) <= 5])))
+        with state_lock:
+            state["tickers"] = clean_tickers
+            state["last_ticker_update"] = datetime.now().isoformat()
+            save_state()
+        logger.info(f"Successfully updated ticker list: {len(clean_tickers)} symbols found.")
+        return clean_tickers
     except Exception as e:
-        logger.warning(f"Halt check error: {e}")
-    return False, None, None, None, None
+        logger.error(f"Ticker update error: {e}")
+        return state.get("tickers", [])
 
-# ================= SIGNAL CONTROL =================
-def is_seen(symbol: str) -> bool:
-    now = time.time()
-    with state_lock:
-        ts = state["seen_signals"].get(symbol)
-        return ts is not None and now - ts < SIGNAL_COOLDOWN
-
-def mark_seen(symbol: str):
-    with state_lock:
-        state["seen_signals"][symbol] = time.time()
-        save_state()
-
-def is_halt_alerted(symbol: str) -> bool:
-    now = time.time()
-    with state_lock:
-        ts = state["halted_alerts"].get(symbol)
-        return ts is not None and now - ts < 3600
-
-def mark_halt_alerted(symbol: str):
-    with state_lock:
-        state["halted_alerts"][symbol] = time.time()
-        save_state()
-
-def should_send_accumulation_alert(symbol: str, new_score: int) -> bool:
-    with state_lock:
-        last = state["last_accumulation"].get(symbol)
-        if not last:
-            return True
-        if abs(new_score - last.get("score", 0)) >= 10:
-            return True
-        if time.time() - last.get("time", 0) > 4 * 3600:
-            return True
-    return False
-
-def update_accumulation_alert(symbol: str, new_score: int):
-    with state_lock:
-        state["last_accumulation"][symbol] = {"score": new_score, "time": time.time()}
-        save_state()
-
-# ================= MARKET HOURS =================
-def is_market_open() -> bool:
-    tz  = pytz.timezone("US/Eastern")
-    now = datetime.now(tz)
-    if now.weekday() >= 5:
-        return False
-    open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
-    close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
-    return open_t <= now <= close_t
-
-def get_market_session() -> tuple[str, str]:
-    tz   = pytz.timezone("US/Eastern")
-    now  = datetime.now(tz)
-    hour = now.hour
-    if 9 <= hour < 16:
-        return "REGULAR HOURS", "🟢 تداول نشط"
-    elif 4 <= hour < 9:
-        return "PRE-MARKET", "🟡 تحليل فقط"
-    else:
-        return "AFTER-HOURS", "🟡 تحليل فقط"
+# ================= TELEGRAM HELPERS =================
+def send_telegram(message):
+    if bot and CHAT_ID:
+        try:
+            bot.send_message(CHAT_ID, message, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Telegram error: {e}")
 
 # ================= RISK MANAGEMENT =================
-def can_trade(price: float, atr: float) -> tuple[bool, int]:
-    reset_daily_loss_if_needed()
-    with state_lock:
-        if len(state["open_trades"]) >= MAX_OPEN_TRADES:
-            return False, 0
-        if state["daily_loss"] >= DAILY_LOSS_LIMIT:
-            return False, 0
+def calculate_position_size(price):
+    stop_loss = price * (1 - SL_PCT)
+    risk_per_share = price - stop_loss
+    if risk_per_share <= 0: return 1
+    risk_amount = CAPITAL * RISK_PER_TRADE
+    size = int(risk_amount / risk_per_share)
+    return max(1, min(size, 100))
 
-    risk_amount   = CAPITAL * RISK_PER_TRADE
-    stop_distance = atr * 2 if atr > 0 else price * 0.02
-    size          = int(risk_amount / stop_distance)
+# ================= INDICATORS =================
+def compute_indicators(df):
+    df = df.copy()
+    df["ema9"] = df["close"].ewm(span=9).mean()
+    df["ema21"] = df["close"].ewm(span=21).mean()
+    delta = df["close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / (loss + 1e-9)
+    df["rsi"] = 100 - (100 / (1 + rs))
+    df["vol_ma"] = df["volume"].rolling(20).mean()
+    df["tr"] = np.maximum(df["high"] - df["low"], np.maximum(abs(df["high"] - df["close"].shift(1)), abs(df["low"] - df["close"].shift(1))))
+    df["atr"] = df["tr"].rolling(14).mean()
+    df["sma"] = df["close"].rolling(20).mean()
+    df["std"] = df["close"].rolling(20).std()
+    df["upper_band"] = df["sma"] + (df["std"] * 2)
+    df["lower_band"] = df["sma"] - (df["std"] * 2)
+    df["bandwidth"] = (df["upper_band"] - df["lower_band"]) / (df["sma"] + 1e-9)
+    return df
 
-    if size < 1:
-        return False, 0
+# ================= PATTERN DETECTION =================
+def detect_accumulation(df):
+    if len(df) < 30: return False, 0
+    last_10 = df.tail(10)
+    last_20 = df.tail(20)
+    price_change = abs((df['close'].iloc[-1] - df['close'].iloc[-20]) / (df['close'].iloc[-20] + 1e-9))
+    price_stable = price_change < 0.015
+    volume_surge = last_10['volume'].mean() > last_20['volume'].mean() * 1.2
+    tight_range = (last_10['high'].max() - last_10['low'].min()) / (df['close'].iloc[-1] + 1e-9) < 0.04
+    acc_score = 0
+    if price_stable: acc_score += 30
+    if volume_surge: acc_score += 40
+    if tight_range: acc_score += 30
+    return acc_score >= 60, acc_score
 
-    # Cap at 20% of capital per trade
-    if size * price > CAPITAL * 0.2:
-        size = int(CAPITAL * 0.2 / price)
+def detect_pre_breakout(df):
+    if len(df) < 20: return False
+    is_squeezing = df['bandwidth'].iloc[-1] < df['bandwidth'].iloc[-10] * 0.7
+    approaching = df['close'].iloc[-1] > df['upper_band'].iloc[-1] * 0.97
+    volume_surge = df['volume'].iloc[-3:].mean() > df['volume'].rolling(20).mean().iloc[-1] * 1.5
+    return is_squeezing and approaching and volume_surge
 
-    return (size >= 1), max(1, size)
+# ================= SCORING =================
+def score_stock(df, vol_surge_mult=2.0):
+    if df is None or len(df) < 20:
+        return 0, {}
+    last = df.iloc[-1]
+    vol_surge = last['volume'] > df['vol_ma'].iloc[-1] * vol_surge_mult
+    price_break = last['close'] > df['high'].iloc[-20:-1].max()
+    score = 0
+    if vol_surge: score += 40
+    if price_break: score += 40
+    if 40 < last['rsi'] < 70: score += 10
+    if last['ema9'] > last['ema21']: score += 10
+    return score, {"price": last['close']}
 
-# ================= CHART =================
-def generate_chart(symbol: str, df: pd.DataFrame, entry: float, tp: float, sl: float,
-                   is_penny: bool = False, is_accumulating: bool = False,
-                   session: str = "", breakdown: dict = None) -> io.BytesIO | None:
+# ================= CHART GENERATION =================
+def generate_chart(symbol, df, entry, tp, sl, is_accumulating=False, is_pre_breakout=False):
     try:
-        df_plot = df.tail(80).copy()
-        fig, axes = plt.subplots(3, 1, figsize=(14, 12),
-                                 gridspec_kw={'height_ratios': [3, 1, 1]})
-        ax1, ax2, ax3 = axes
-
-        # --- Price panel ---
-        ax1.plot(df_plot.index, df_plot['close'],      color='cyan',   linewidth=1.5, label='Price')
-        ax1.plot(df_plot.index, df_plot['ema9'],       color='yellow', linewidth=1,   alpha=0.8, label='EMA 9')
-        ax1.plot(df_plot.index, df_plot['ema21'],      color='orange', linewidth=1,   alpha=0.8, label='EMA 21')
-        ax1.plot(df_plot.index, df_plot['ema50'],      color='magenta',linewidth=1,   alpha=0.6, label='EMA 50')
-        ax1.fill_between(df_plot.index, df_plot['upper_band'], df_plot['lower_band'],
-                         alpha=0.08, color='gray', label='Bollinger')
-        ax1.axhline(y=entry, color='lime',  linestyle='--', linewidth=1.5, label=f'Entry ${entry:.2f}')
-        ax1.axhline(y=tp,    color='green', linestyle='--', linewidth=1.5, label=f'TP ${tp:.2f}')
-        ax1.axhline(y=sl,    color='red',   linestyle='--', linewidth=1.5, label=f'SL ${sl:.2f}')
-        ax1.fill_between(df_plot.index, entry, tp, alpha=0.15, color='green')
-        ax1.fill_between(df_plot.index, sl, entry, alpha=0.15, color='red')
-
-        if df_plot['bandwidth'].iloc[-1] < df_plot['bandwidth'].iloc[-10] * 0.7:
-            ax1.axvspan(df_plot.index[-5], df_plot.index[-1], alpha=0.25, color='yellow', label='Pre-Breakout')
-
-        ax1.set_title(f'{symbol}  |  {session}', fontsize=13, color='white')
-        ax1.set_ylabel('Price ($)', color='white')
-        ax1.legend(loc='upper left', fontsize=8, ncol=2)
+        df_plot = df.tail(60).copy()
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
+        ax1.plot(df_plot.index, df_plot['close'], 'cyan', linewidth=1.5, label='Price')
+        ax1.plot(df_plot.index, df_plot['ema9'], 'yellow', linewidth=1, alpha=0.7, label='EMA 9')
+        ax1.plot(df_plot.index, df_plot['ema21'], 'orange', linewidth=1, alpha=0.7, label='EMA 21')
+        ax1.fill_between(df_plot.index, df_plot['upper_band'], df_plot['lower_band'], alpha=0.1, color='gray', label='Bollinger Bands')
+        ax1.axhline(y=entry, color='lime', linestyle='--', linewidth=1.5, label=f'Entry ${entry:.2f}')
+        ax1.axhline(y=tp, color='green', linestyle='--', linewidth=1.5, label=f'TP ${tp:.2f}')
+        ax1.axhline(y=sl, color='red', linestyle='--', linewidth=1.5, label=f'SL ${sl:.2f}')
+        if is_pre_breakout: ax1.axvspan(df_plot.index[-5], df_plot.index[-1], alpha=0.2, color='yellow', label='Pre-Breakout')
+        ax1.set_title(f'{symbol} - Trading Signal', fontsize=14, color='white')
         ax1.grid(True, alpha=0.15)
         ax1.tick_params(colors='white')
-
-        # --- Volume panel ---
-        colors = ['green' if df_plot['close'].iloc[i] >= df_plot['open'].iloc[i] else 'red'
-                  for i in range(len(df_plot))]
+        colors = ['green' if df_plot['close'].iloc[i] >= df_plot['open'].iloc[i] else 'red' for i in range(len(df_plot))]
         ax2.bar(df_plot.index, df_plot['volume'], color=colors, alpha=0.7)
-        ax2.axhline(y=df_plot['vol_ma'].iloc[-1], color='blue', linestyle='--', linewidth=1, label='Avg Vol')
+        ax2.axhline(y=df_plot['vol_ma'].iloc[-1], color='blue', linestyle='--', linewidth=1, label='Avg Volume')
         ax2.set_ylabel('Volume', color='white')
-        ax2.legend(loc='upper left', fontsize=8)
-        ax2.grid(True, alpha=0.15)
         ax2.tick_params(colors='white')
-
-        # --- MACD panel (NEW) ---
-        ax3.plot(df_plot.index, df_plot['macd'],   color='cyan',  linewidth=1,   label='MACD')
-        ax3.plot(df_plot.index, df_plot['signal'], color='orange',linewidth=1,   label='Signal')
-        hist_colors = ['green' if v >= 0 else 'red' for v in df_plot['macd_hist']]
-        ax3.bar(df_plot.index, df_plot['macd_hist'], color=hist_colors, alpha=0.6)
-        ax3.axhline(0, color='white', linewidth=0.5)
-        ax3.set_ylabel('MACD', color='white')
-        ax3.set_xlabel('Time', color='white')
-        ax3.legend(loc='upper left', fontsize=8)
-        ax3.grid(True, alpha=0.15)
-        ax3.tick_params(colors='white')
-
         plt.tight_layout()
         buf = io.BytesIO()
         plt.savefig(buf, format='png', dpi=100, facecolor='#0d1117')
@@ -581,484 +275,327 @@ def generate_chart(symbol: str, df: pd.DataFrame, entry: float, tp: float, sl: f
         plt.close(fig)
         return buf
     except Exception as e:
-        logger.error(f"Chart generation error for {symbol}: {e}")
+        logger.error(f"Chart error: {e}")
         return None
 
-def send_chart(symbol: str, df: pd.DataFrame, entry: float, tp: float, sl: float,
-               is_penny: bool, is_accumulating: bool, session: str, breakdown: dict):
-    if not bot:
-        return
-    buf = generate_chart(symbol, df, entry, tp, sl, is_penny, is_accumulating, session, breakdown)
-    if buf is None:
-        return
-    caption = f"📊 *{symbol}*\n💰 Entry: ${entry:.2f}  🎯 TP: ${tp:.2f}  🛑 SL: ${sl:.2f}"
-    if is_penny:
-        caption += "\n🔥 *Penny Stock*"
-    if is_accumulating:
-        caption += "\n📦 *Accumulation Detected*"
+# ================= FAST FILTER =================
+def fast_filter(symbol):
     try:
-        bot.send_photo(chat_id=CHAT_ID, photo=buf, caption=caption, parse_mode='Markdown')
+        df = yf.download(symbol, period="1d", progress=False)
+        if df.empty: return False
+        price = df["Close"].iloc[-1]
+        volume = df["Volume"].iloc[-1]
+        return MIN_PRICE < price < MAX_PRICE and volume > MIN_VOLUME
+    except: return False
+
+# ================= BACKTEST =================
+def run_backtest(symbol):
+    try:
+        df = yf.download(symbol, period="60d", interval="1h", progress=False)
+        if df.empty or len(df) < 50:
+            return None
+        df.columns = [c.lower() for c in df.columns]
+        df = compute_indicators(df)
+        trades = []
+        in_trade = False
+        entry_price = 0
+        for i in range(50, len(df)):
+            window = df.iloc[:i]
+            last = window.iloc[-1]
+            if not in_trade:
+                score, _ = score_stock(window, 2.0)
+                if score >= 70:
+                    entry_price = last['close']
+                    in_trade = True
+            else:
+                if last['close'] >= entry_price * TP_PCT:
+                    trades.append({"pnl": (last['close'] - entry_price) / entry_price * 100, "result": "win"})
+                    in_trade = False
+                elif last['close'] <= entry_price * SL_PCT:
+                    trades.append({"pnl": (last['close'] - entry_price) / entry_price * 100, "result": "loss"})
+                    in_trade = False
+        if not trades: return None
+        wins = sum(1 for t in trades if t["result"] == "win")
+        total_pnl = sum(t["pnl"] for t in trades)
+        return {
+            "total_trades": len(trades),
+            "wins": wins,
+            "losses": len(trades) - wins,
+            "win_rate": round(wins / len(trades) * 100, 1),
+            "avg_pnl": round(total_pnl / len(trades), 2),
+            "total_pnl": round(total_pnl, 2)
+        }
     except Exception as e:
-        logger.error(f"send_photo error: {e}")
+        logger.error(f"Backtest error: {e}")
+        return None
+
+# ================= PROCESS SYMBOL =================
+def process_symbol(symbol):
+    try:
+        reset_daily_loss_if_needed()
+        phase = get_market_phase()
+        settings = PHASE_SETTINGS.get(phase, PHASE_SETTINGS["CLOSED"])
+        if phase == "CLOSED": return
+        with state_lock:
+            if symbol in state["open_trades"] or state.get("daily_loss", 0) >= DAILY_LOSS_LIMIT: return
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="5d", interval="15m")
+        if df.empty: return
+        df.columns = [c.lower() for c in df.columns]
+        df = compute_indicators(df)
+        is_accumulating, acc_score = detect_accumulation(df)
+        is_pre_breakout = detect_pre_breakout(df)
+        
+        score, details = score_stock(df, settings["vol_surge_mult"])
+        
+        if score >= settings["min_score"]:
+            now = time.time()
+            last_seen = state["seen_signals"].get(symbol, 0)
+            if now - last_seen > SIGNAL_COOLDOWN:
+                open_trade(symbol, details['price'], score, df, is_accumulating, is_pre_breakout, phase, settings)
+                with state_lock:
+                    state["seen_signals"][symbol] = now
+                    save_state()
+    except Exception: pass
 
 # ================= TRADE MANAGEMENT =================
-def open_trade(symbol: str, price: float, atr: float, score_val: int,
-               size: int, df: pd.DataFrame, is_penny: bool,
-               is_accumulating: bool, breakdown: dict):
-    tp = round(price + atr * 2, 4)
-    sl = round(price - atr * 2, 4)
-    session, _ = get_market_session()
-
+def open_trade(symbol, price, score, df, is_accumulating=False, is_pre_breakout=False, phase="REGULAR", settings=None):
     with state_lock:
-        state["open_trades"][symbol] = {
-            "entry": price, "tp": tp, "sl": sl,
-            "size":  size,  "time": time.time(),
-            "score": score_val, "atr": atr,
-        }
+        if state.get("daily_loss", 0) >= DAILY_LOSS_LIMIT or len(state["open_trades"]) >= MAX_OPEN_TRADES: return
+        size = int(calculate_position_size(price) * settings["size_multiplier"])
+        tp, sl = price * TP_PCT, price * SL_PCT
+        state["open_trades"][symbol] = {"entry": price, "tp": tp, "sl": sl, "size": size, "time": time.time(), "score": score, "phase": phase}
         save_state()
+    chart = generate_chart(symbol, df, price, tp, sl, is_accumulating, is_pre_breakout)
+    phase_emoji = "🟡" if phase == "PRE" else ("🔵" if phase == "AFTER" else "🟢")
+    caption = f"{phase_emoji} *EXPLOSION ALERT: {symbol}* ({phase})\n💰 Entry: ${price:.2f}\n🎯 TP: ${tp:.2f}\n🛑 SL: ${sl:.2f}\n📦 Size: {size}\n📊 Score: {score}/{settings['min_score']}\n📋 {settings['description']}"
+    if is_accumulating: caption += "\n📦 *Accumulation Pattern*"
+    if is_pre_breakout: caption += "\n⚡ *Pre-Breakout*"
+    if chart and bot: bot.send_photo(CHAT_ID, chart, caption=caption, parse_mode='Markdown')
+    else: send_telegram(caption)
 
-    send_chart(symbol, df, price, tp, sl, is_penny, is_accumulating, session, breakdown)
-
-    score_breakdown = " | ".join(f"{k}:{v}" for k, v in breakdown.items()
-                                 if isinstance(v, (int, float)))
-    msg = (
-        f"🚀 *NEW TRADE* ({session})\n"
-        f"📊 {symbol}\n"
-        f"💰 Entry: ${price:.2f}\n"
-        f"🎯 TP:    ${tp:.2f}\n"
-        f"🛑 SL:    ${sl:.2f}\n"
-        f"⭐ Score: {score_val}/100\n"
-        f"📦 Shares: {size}\n"
-        f"📈 Breakdown: {score_breakdown}"
-    )
-    send_telegram(msg)
-
-def close_trade(symbol: str, price: float):
+def close_trade(symbol, price, reason):
     with state_lock:
-        trade = state["open_trades"].pop(symbol, None)
-        if not trade:
-            return
-        pnl  = round((price - trade["entry"]) * trade["size"], 2)
-        perf = state["performance"].setdefault(symbol, {"wins": 0, "losses": 0, "total_pnl": 0.0})
-        if pnl >= 0:
-            perf["wins"] += 1
+        if symbol not in state["open_trades"]: return
+        trade = state["open_trades"].pop(symbol)
+        pnl = (price - trade["entry"]) * trade["size"]
+        pnl_pct = ((price - trade["entry"]) / trade["entry"]) * 100
+        if pnl > 0: state["performance"]["wins"] += 1
         else:
-            perf["losses"] += 1
-            state["daily_loss"] += abs(pnl)
-        perf["total_pnl"] = round(perf.get("total_pnl", 0) + pnl, 2)
-        state["equity_curve"].append({"time": time.time(), "pnl": pnl})
+            state["performance"]["losses"] += 1
+            state["daily_loss"] = state.get("daily_loss", 0) + abs(pnl)
+        state["performance"]["total_pnl"] += pnl
         save_state()
+    emoji = "🎉" if pnl > 0 else "🛑"
+    send_telegram(f"{emoji} *CLOSED: {symbol}*\n📝 {reason}\n💵 Exit: ${price:.2f}\n📈 PnL: ${pnl:+.2f} ({pnl_pct:+.2f}%)\n📊 Daily Loss: ${state.get('daily_loss', 0):.2f}")
 
-    result = "WIN 🎉" if pnl >= 0 else "LOSS ❌"
-    msg = (
-        f"🔒 *TRADE CLOSED*\n"
-        f"📊 {symbol}\n"
-        f"📉 Exit: ${price:.2f}\n"
-        f"🏆 {result}\n"
-        f"💰 PnL: ${pnl:+.2f}"
-    )
-    send_telegram(msg)
-
-def update_positions():
-    """Check open trades against cached prices."""
-    with cache_lock:
-        cache_snapshot = dict(data_cache)
-
-    for symbol, trade in list(state["open_trades"].items()):
-        df = cache_snapshot.get(symbol)
-        if df is None:
-            continue
-        price = df["close"].iloc[-1]
-        if price >= trade["tp"] or price <= trade["sl"]:
-            close_trade(symbol, price)
-
-# ================= CACHE BUILD (THREAD-SAFE) =================
-def build_cache(symbols: list, period: str = '5d', interval: str = '15m'):
-    """Fetch and compute indicators for all symbols, then swap cache atomically."""
-    new_cache = {}
+def update_trades():
+    with state_lock:
+        symbols = list(state["open_trades"].keys())
     for symbol in symbols:
-        df = fetch_yfinance_data(symbol, period, interval)
-        if df is not None and len(df) >= 50:
-            new_cache[symbol] = compute_indicators(df)
-        time.sleep(0.2)
-
-    with cache_lock:
-        data_cache.clear()
-        data_cache.update(new_cache)
-
-    logger.info(f"Cache refreshed: {len(data_cache)} symbols")
-
-# ================= SCAN =================
-def quick_filter_stocks(symbols: list) -> list:
-    promising = []
-    for i, symbol in enumerate(symbols):
         try:
-            quick = fetch_yfinance_quick(symbol)
-            if quick:
-                price    = quick['price']
-                volume   = quick['volume']
-                avg_vol  = quick['avg_volume']
-                change   = quick['change_pct']
-                # Filter: price range, volume activity, positive momentum
-                if (1.0 < price < 200 and
-                        volume > 150_000 and
-                        volume > avg_vol * 1.1 and
-                        change > -3):
-                    promising.append(symbol)
-            if (i + 1) % 50 == 0:
-                logger.info(f"Quick filter: {i+1}/{len(symbols)}")
-        except Exception:
-            pass
-        time.sleep(0.1)
-    logger.info(f"Quick filter: {len(promising)} / {len(symbols)} passed")
-    return promising[:100]
+            df = yf.Ticker(symbol).history(period='1d', interval='5m')
+            if df.empty: continue
+            price = df['Close'].iloc[-1]
+            with state_lock:
+                trade = state["open_trades"].get(symbol)
+                if not trade: continue
+                if price >= trade["tp"]: close_trade(symbol, price, "TAKE PROFIT")
+                elif price <= trade["sl"]: close_trade(symbol, price, "STOP LOSS")
+        except: pass
 
-def deep_analysis(symbols: list) -> list:
-    results = []
-    for symbol in symbols:
-        if is_seen(symbol):
-            continue
-        with cache_lock:
-            df = data_cache.get(symbol)
-
-        if df is None:
-            df = fetch_yfinance_data(symbol, '5d', '15m')
-            if df is None or len(df) < 50:
-                continue
-            df = compute_indicators(df)
-            with cache_lock:
-                data_cache[symbol] = df
-
-        score_val, breakdown = score_signal(df)
-        if score_val >= MIN_SCORE_REGULAR - 10:
-            results.append((symbol, score_val, breakdown, df))
-        time.sleep(0.05)
-
-    return sorted(results, key=lambda x: x[1], reverse=True)
-
-def scan_large_universe():
-    session, _ = get_market_session()
-    logger.info(f"🔄 Scan started ({len(dynamic_universe)} symbols) [{session}]")
-
-    # Step 1: quick filter
-    promising = quick_filter_stocks(dynamic_universe)
-    if not promising:
-        logger.warning("No promising stocks from quick filter")
-        return
-
-    # Step 2: build cache for filtered list
-    build_cache(promising)
-
-    # Step 3: deep analysis
-    top_signals = deep_analysis(promising)
-    logger.info(f"Top signals: {len(top_signals)}")
-
-    # Step 4: process top 5
-    for symbol, score_val, breakdown, df in top_signals[:5]:
-        price     = df["close"].iloc[-1]
-        atr       = df["atr"].iloc[-1]
-        is_penny  = is_penny_stock(price)
-        threshold = MIN_SCORE_PENNY if is_penny else MIN_SCORE_REGULAR
-
-        if score_val < threshold or is_seen(symbol):
-            continue
-        if pd.isna(atr) or atr <= 0:
-            atr = price * 0.02
-
-        # Halt check
-        halted, *halt_info = check_trading_halt(symbol)
-        if halted and not is_halt_alerted(symbol):
-            send_telegram(f"🚨 *TRADING HALT*: {symbol} — {halt_info[2]}")
-            mark_halt_alerted(symbol)
-            continue
-
-        is_acc, acc_score = detect_accumulation(df)
-        ok, size          = can_trade(price, atr)
-
-        if ok:
-            open_trade(symbol, price, atr, score_val, size, df, is_penny, is_acc, breakdown)
-            mark_seen(symbol)
-
-# ================= TELEGRAM =================
-def send_telegram(msg: str):
-    if not bot:
-        print(f"[Telegram] {msg}")
-        return
-    try:
-        bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Telegram send error: {e}")
-
-def generate_analysis_message(symbol: str) -> str:
-    df = fetch_yfinance_data(symbol, '10d', '15m')
-    if df is None or len(df) < 50:
-        return f"⚠️ No sufficient data for {symbol}"
-
-    df        = compute_indicators(df)
-    session, _= get_market_session()
-    score_val, breakdown = score_signal(df)
-    price     = df["close"].iloc[-1]
-    atr       = df["atr"].iloc[-1]
-    volume    = df["volume"].iloc[-1]
-    avg_vol   = df["vol_ma"].iloc[-1]
-    rsi       = df["rsi"].iloc[-1]
-    adx       = df["adx"].iloc[-1]
-    is_penny  = is_penny_stock(price)
-    is_acc, acc_score    = detect_accumulation(df)
-    pre_bo    = pre_breakout_detection(df)
-
-    # Backtest summary
-    bt = simple_backtest(symbol, df)
-    bt_line = ""
-    if bt.get("total_trades", 0) > 0:
-        bt_line = (f"🔬 Backtest: {bt['total_trades']} trades | "
-                   f"WR {bt['win_rate']}% | Avg PnL ${bt['avg_pnl']:.3f}\n")
-
-    breakdown_str = " | ".join(f"{k}:{v}" for k, v in breakdown.items()
-                               if isinstance(v, (int, float)))
-
-    msg  = f"📊 *{symbol} Analysis* ({session})\n"
-    msg += f"💰 Price:   ${price:.2f}\n"
-    msg += f"📊 Volume:  {volume:,.0f}  (avg {avg_vol:,.0f})\n"
-    msg += f"🎢 ATR:     ${atr:.2f}\n"
-    msg += f"⚡ RSI:     {rsi:.1f}\n"
-    msg += f"💪 ADX:     {adx:.1f}\n"
-    msg += f"🧠 Score:   {score_val}/100\n"
-    msg += f"📐 Detail:  {breakdown_str}\n"
-    msg += bt_line
-    if is_penny:     msg += "🔥 *Penny Stock*\n"
-    if is_acc:       msg += f"📦 *Accumulation* ({acc_score}%)\n"
-    if pre_bo:       msg += "⚡ *Pre-Breakout Detected*\n"
-    return msg
-
-# ================= COMMANDS =================
-@bot.message_handler(commands=['start'])
-def cmd_start(message):
-    session, session_msg = get_market_session()
-    welcome = (
-        "🚀 *AI Trading Bot v19*\n\n"
-        f"*Session:* {session}\n{session_msg}\n\n"
-        "*Commands:*\n"
-        "/scan \\<symbol\\> — Technical analysis + backtest\n"
-        "/status — Bot overview\n"
-        "/positions — Open trades\n"
-        "/performance — Win/loss stats\n"
-        "/backtest \\<symbol\\> — Run backtest only\n"
-        "/close \\<symbol\\> — Manually close trade\n"
-    )
-    bot.reply_to(message, welcome, parse_mode='Markdown')
-
-@bot.message_handler(commands=['scan'])
-def cmd_scan(message):
-    parts = message.text.split()
-    if len(parts) != 2:
-        bot.reply_to(message, "⚠️ Usage: /scan <SYMBOL>")
-        return
-    symbol = parts[1].upper().strip()
-    msg_obj = bot.reply_to(message, f"🔍 Analyzing {symbol}…")
-
-    def do_analysis():
-        analysis = generate_analysis_message(symbol)
-        try:
-            bot.edit_message_text(chat_id=message.chat.id,
-                                  message_id=msg_obj.message_id,
-                                  text=analysis, parse_mode='Markdown')
-        except Exception:
-            bot.send_message(chat_id=message.chat.id, text=analysis, parse_mode='Markdown')
-
-    future = executor.submit(do_analysis)
-    try:
-        future.result(timeout=25)
-    except TimeoutError:
-        bot.edit_message_text(chat_id=message.chat.id,
-                              message_id=msg_obj.message_id,
-                              text="⚠️ Timeout. Try again.")
-
-@bot.message_handler(commands=['backtest'])
-def cmd_backtest(message):
-    parts = message.text.split()
-    if len(parts) != 2:
-        bot.reply_to(message, "⚠️ Usage: /backtest <SYMBOL>")
-        return
-    symbol  = parts[1].upper().strip()
-    msg_obj = bot.reply_to(message, f"🔬 Running backtest for {symbol}…")
-
-    def do_bt():
-        df = fetch_yfinance_data(symbol, '60d', '1h')
-        if df is None or len(df) < 80:
-            bot.edit_message_text(chat_id=message.chat.id,
-                                  message_id=msg_obj.message_id,
-                                  text="⚠️ Not enough data for backtest (need 60d 1h).")
-            return
-        df  = compute_indicators(df)
-        bt  = simple_backtest(symbol, df)
-        if not bt or bt.get("total_trades", 0) == 0:
-            text = f"⚠️ No trades triggered for {symbol} in backtest period."
-        else:
-            emoji = "✅" if bt["profitable"] else "❌"
-            text  = (
-                f"🔬 *Backtest: {symbol}*\n"
-                f"📊 Trades:   {bt['total_trades']}\n"
-                f"✅ Wins:     {bt['wins']}\n"
-                f"❌ Losses:   {bt['losses']}\n"
-                f"📈 Win Rate: {bt['win_rate']}%\n"
-                f"💰 Avg PnL:  ${bt['avg_pnl']:.4f}\n"
-                f"{emoji} Strategy: {'PROFITABLE' if bt['profitable'] else 'UNPROFITABLE'}"
-            )
-        bot.edit_message_text(chat_id=message.chat.id,
-                              message_id=msg_obj.message_id,
-                              text=text, parse_mode='Markdown')
-
-    future = executor.submit(do_bt)
-    try:
-        future.result(timeout=60)
-    except TimeoutError:
-        bot.edit_message_text(chat_id=message.chat.id,
-                              message_id=msg_obj.message_id,
-                              text="⚠️ Backtest timed out.")
-
-@bot.message_handler(commands=['status'])
-def cmd_status(message):
-    reset_daily_loss_if_needed()
-    session, session_msg = get_market_session()
-    with state_lock:
-        total_wins   = sum(p["wins"]   for p in state["performance"].values())
-        total_losses = sum(p["losses"] for p in state["performance"].values())
-        total        = total_wins + total_losses
-        winrate      = (total_wins / total * 100) if total else 0
-        total_pnl    = sum(p.get("total_pnl", 0) for p in state["performance"].values())
-        open_count   = len(state["open_trades"])
-        daily_loss   = state["daily_loss"]
-
-    msg = (
-        f"📊 *Bot Status* ({session})\n"
-        f"{session_msg}\n\n"
-        f"💰 Capital:     ${CAPITAL:,.0f}\n"
-        f"📈 Open Trades: {open_count}/{MAX_OPEN_TRADES}\n"
-        f"✅ Wins:        {total_wins}\n"
-        f"❌ Losses:      {total_losses}\n"
-        f"📈 Win Rate:    {winrate:.1f}%\n"
-        f"💵 Total PnL:   ${total_pnl:+.2f}\n"
-        f"📉 Daily Loss:  ${daily_loss:.2f} / ${DAILY_LOSS_LIMIT}\n"
-        f"🌐 Universe:    {len(dynamic_universe)} stocks\n"
-        f"📦 Cached:      {len(data_cache)} symbols"
-    )
-    bot.reply_to(message, msg, parse_mode='Markdown')
-
-@bot.message_handler(commands=['positions'])
-def cmd_positions(message):
-    with state_lock:
-        trades = dict(state["open_trades"])
-    if not trades:
-        bot.reply_to(message, "📭 No open positions")
-        return
-    lines = ["*Open Positions*\n"]
-    for sym, t in trades.items():
-        age = int((time.time() - t["time"]) / 60)
-        lines.append(
-            f"🔹 *{sym}*\n"
-            f"   Entry ${t['entry']:.2f} | TP ${t['tp']:.2f} | SL ${t['sl']:.2f}\n"
-            f"   Shares {t['size']} | Age {age}m | Score {t['score']}"
-        )
-    bot.reply_to(message, "\n".join(lines), parse_mode='Markdown')
-
-@bot.message_handler(commands=['performance'])
-def cmd_performance(message):
-    with state_lock:
-        perf = dict(state["performance"])
-    if not perf:
-        bot.reply_to(message, "📭 No completed trades yet")
-        return
-    lines = ["*Per-Symbol Performance*\n"]
-    for sym, p in sorted(perf.items(), key=lambda x: x[1].get("total_pnl", 0), reverse=True):
-        total = p["wins"] + p["losses"]
-        wr    = (p["wins"] / total * 100) if total else 0
-        lines.append(
-            f"*{sym}*: {p['wins']}W / {p['losses']}L "
-            f"({wr:.1f}%) | PnL ${p.get('total_pnl', 0):+.2f}"
-        )
-    bot.reply_to(message, "\n".join(lines), parse_mode='Markdown')
-
-@bot.message_handler(commands=['close'])
-def cmd_close(message):
-    parts = message.text.split()
-    if len(parts) != 2:
-        bot.reply_to(message, "⚠️ Usage: /close <SYMBOL>")
-        return
-    symbol = parts[1].upper().strip()
-    with state_lock:
-        if symbol not in state["open_trades"]:
-            bot.reply_to(message, f"📭 No open trade for {symbol}")
-            return
-    df = fetch_yfinance_data(symbol, '1d', '5m')
-    if df is None or df.empty:
-        bot.reply_to(message, f"⚠️ Cannot fetch current price for {symbol}")
-        return
-    price = df["close"].iloc[-1]
-    close_trade(symbol, price)
-    bot.reply_to(message, f"✅ Manually closed *{symbol}* at ${price:.2f}", parse_mode='Markdown')
-
-# ================= BACKGROUND SCANNER =================
+# ================= SCANNER ENGINE =================
 def background_scanner():
-    last_scan        = 0
-    last_cache_build = 0
-
     while True:
         try:
-            now = time.time()
-
-            # Refresh cache every 10 minutes even outside scan
-            if now - last_cache_build > 600 and is_market_open():
-                build_cache(dynamic_universe[:50])   # top-50 always warm
-                last_cache_build = now
-
-            # Full scan every 5 minutes during market hours
-            if now - last_scan > 300 and is_market_open():
-                logger.info("🔄 Full scan triggered")
-                scan_large_universe()
-                update_positions()
-                last_scan = now
-
-            time.sleep(60)
+            phase = get_market_phase()
+            if phase != "CLOSED":
+                with state_lock:
+                    if not state["tickers"] or (state["last_ticker_update"] and (datetime.now() - datetime.fromisoformat(state["last_ticker_update"])).days >= 1):
+                        update_all_tickers()
+                    tickers = list(state["tickers"])
+                chunk_size = 500
+                for i in range(0, len(tickers), chunk_size):
+                    chunk = tickers[i:i+chunk_size]
+                    filtered = []
+                    with ThreadPoolExecutor(max_workers=20) as executor:
+                        future_to_sym = {executor.submit(fast_filter, sym): sym for sym in chunk}
+                        for future in as_completed(future_to_sym):
+                            if future.result(): filtered.append(future_to_sym[future])
+                    if filtered:
+                        with ThreadPoolExecutor(max_workers=15) as executor:
+                            executor.map(process_symbol, filtered)
+                    time.sleep(1)
+            time.sleep(SCAN_INTERVAL_SEC)
         except Exception as e:
-            logger.error(f"Scanner loop error: {e}", exc_info=True)
+            logger.error(f"Scanner error: {e}")
             time.sleep(60)
 
-# ================= FLASK =================
-@app.route("/", methods=['GET'])
-def home():
-    return f"AI Trading Bot v19 | Cache: {len(data_cache)} | Trades: {len(state['open_trades'])}"
+def background_monitor():
+    while True:
+        try:
+            if get_market_phase() != "CLOSED": update_trades()
+            time.sleep(TRADE_MONITOR_INTERVAL)
+        except Exception as e:
+            logger.error(f"Monitor error: {e}")
+            time.sleep(30)
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    try:
-        update = telebot.types.Update.de_json(request.data.decode("utf-8"))
-        bot.process_new_updates([update])
-        return "ok", 200
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return "error", 500
+# ================= TELEGRAM HANDLERS (FULL COMMANDS) =================
+if bot:
+    @bot.message_handler(commands=['start'])
+    def cmd_start(message):
+        phase = get_market_phase()
+        phase_desc = PHASE_SETTINGS.get(phase, PHASE_SETTINGS["CLOSED"])["description"]
+        welcome = f"""
+🚀 *AI Trading Bot V28 - Full Features*
 
-@app.route("/health", methods=['GET'])
-def health():
-    return json.dumps({
-        "status":      "ok",
-        "cache_size":  len(data_cache),
-        "open_trades": len(state["open_trades"]),
-        "daily_loss":  state["daily_loss"],
-        "market_open": is_market_open(),
-    })
+🕐 Current Market: {phase} - {phase_desc}
 
-# ================= ENTRY POINT =================
+*Features:*
+✅ 7,500+ stocks (NASDAQ/NYSE/AMEX)
+✅ Two-stage filtering (Fast + Deep)
+✅ Explosion detection
+✅ Accumulation detection 📦
+✅ Pre-breakout alerts ⚡
+✅ Automatic charts 📊
+✅ TP/SL management (5%/3%)
+✅ Position sizing (2% risk)
+✅ Daily loss limit ($300)
+✅ 3 market phases (PRE/REGULAR/AFTER)
+
+*Commands:*
+/status - Bot status
+/positions - Open trades
+/scan <symbol> - Analyze any stock
+/backtest <symbol> - Run backtest
+/close <symbol> - Close trade manually
+"""
+        bot.reply_to(message, welcome, parse_mode='Markdown')
+
+    @bot.message_handler(commands=['status'])
+    def cmd_status(message):
+        reset_daily_loss_if_needed()
+        phase = get_market_phase()
+        phase_desc = PHASE_SETTINGS.get(phase, PHASE_SETTINGS["CLOSED"])["description"]
+        with state_lock:
+            perf = state["performance"]
+            total = perf["wins"] + perf["losses"]
+            wr = (perf["wins"] / total * 100) if total > 0 else 0
+            msg = f"📊 *Bot Status (v28)*\n"
+            msg += f"🕐 Market Phase: {phase} - {phase_desc}\n\n"
+            msg += f"✅ Wins: {perf['wins']}\n"
+            msg += f"❌ Losses: {perf['losses']}\n"
+            msg += f"📈 Win Rate: {wr:.1f}%\n"
+            msg += f"💵 Total PnL: ${perf['total_pnl']:+.2f}\n"
+            msg += f"📦 Open Trades: {len(state['open_trades'])}/{MAX_OPEN_TRADES}\n"
+            msg += f"📉 Daily Loss: ${state.get('daily_loss', 0):.2f} / ${DAILY_LOSS_LIMIT}\n"
+            msg += f"🌐 Universe: {len(state['tickers'])} stocks"
+        bot.reply_to(message, msg, parse_mode='Markdown')
+
+    @bot.message_handler(commands=['positions'])
+    def cmd_positions(message):
+        with state_lock:
+            trades = state["open_trades"]
+            if not trades:
+                bot.reply_to(message, "📭 No open positions")
+                return
+            msg = "*Open Positions*\n"
+            for sym, t in trades.items():
+                age = int((time.time() - t["time"]) / 60)
+                msg += f"\n🔹 *{sym}* | Entry ${t['entry']:.2f} | TP ${t['tp']:.2f} | SL ${t['sl']:.2f} | Size {t['size']} | Age {age}m | Phase {t.get('phase', 'REGULAR')}"
+        bot.reply_to(message, msg, parse_mode='Markdown')
+
+    @bot.message_handler(commands=['scan'])
+    def cmd_scan(message):
+        parts = message.text.split()
+        if len(parts) != 2:
+            bot.reply_to(message, "⚠️ Usage: /scan <SYMBOL>")
+            return
+        symbol = parts[1].upper()
+        msg = bot.reply_to(message, f"🔍 Analyzing {symbol}...")
+        try:
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(period="5d", interval="15m")
+            if df.empty:
+                bot.edit_message_text(f"⚠️ No data for {symbol}", chat_id=message.chat.id, message_id=msg.message_id)
+                return
+            df.columns = [c.lower() for c in df.columns]
+            df = compute_indicators(df)
+            phase = get_market_phase()
+            settings = PHASE_SETTINGS.get(phase, PHASE_SETTINGS["REGULAR"])
+            score, details = score_stock(df, settings["vol_surge_mult"])
+            last = df.iloc[-1]
+            is_accumulating, acc_score = detect_accumulation(df)
+            is_pre_breakout = detect_pre_breakout(df)
+            analysis = f"📊 *{symbol} Analysis*\n"
+            analysis += f"💰 Price: ${last['close']:.2f}\n"
+            analysis += f"📊 Volume: {int(last['volume']):,}\n"
+            analysis += f"⚡ RSI: {last['rsi']:.1f}\n"
+            analysis += f"🧠 Score: {score}/{settings['min_score']}\n"
+            analysis += f"🕐 Phase: {phase}\n"
+            if is_accumulating: analysis += f"📦 *Accumulation Pattern* ({acc_score}%)\n"
+            if is_pre_breakout: analysis += f"⚡ *Pre-Breakout Detected*\n"
+            bot.edit_message_text(analysis, chat_id=message.chat.id, message_id=msg.message_id, parse_mode='Markdown')
+        except Exception as e:
+            bot.edit_message_text(f"❌ Error analyzing {symbol}", chat_id=message.chat.id, message_id=msg.message_id)
+
+    @bot.message_handler(commands=['backtest'])
+    def cmd_backtest(message):
+        parts = message.text.split()
+        if len(parts) != 2:
+            bot.reply_to(message, "⚠️ Usage: /backtest <SYMBOL>")
+            return
+        symbol = parts[1].upper()
+        msg = bot.reply_to(message, f"🔬 Running backtest for {symbol}...")
+        result = run_backtest(symbol)
+        if result and result.get("total_trades", 0) > 0:
+            emoji = "✅" if result.get("total_pnl", 0) > 0 else "❌"
+            text = f"🔬 *Backtest: {symbol}*\n"
+            text += f"📊 Trades: {result['total_trades']}\n"
+            text += f"✅ Wins: {result['wins']}\n"
+            text += f"❌ Losses: {result['losses']}\n"
+            text += f"📈 Win Rate: {result['win_rate']}%\n"
+            text += f"💰 Avg PnL: {result['avg_pnl']:+.2f}%\n"
+            text += f"💵 Total PnL: {result['total_pnl']:+.2f}%\n"
+            text += f"{emoji} Strategy: {'PROFITABLE' if result['total_pnl'] > 0 else 'NOT PROFITABLE'}"
+        else:
+            text = f"⚠️ No trades triggered for {symbol} in backtest period (60 days)"
+        bot.edit_message_text(text, chat_id=message.chat.id, message_id=msg.message_id, parse_mode='Markdown')
+
+    @bot.message_handler(commands=['close'])
+    def cmd_close(message):
+        parts = message.text.split()
+        if len(parts) != 2:
+            bot.reply_to(message, "⚠️ Usage: /close <SYMBOL>")
+            return
+        symbol = parts[1].upper()
+        with state_lock:
+            if symbol not in state["open_trades"]:
+                bot.reply_to(message, f"📭 No open trade for {symbol}")
+                return
+        try:
+            df = yf.Ticker(symbol).history(period='1d', interval='5m')
+            if df.empty:
+                bot.reply_to(message, f"⚠️ Cannot fetch price for {symbol}")
+                return
+            price = df['Close'].iloc[-1]
+            close_trade(symbol, price, "MANUAL CLOSE")
+            bot.reply_to(message, f"✅ Closed {symbol} at ${price:.2f}")
+        except Exception as e:
+            bot.reply_to(message, f"❌ Error closing {symbol}: {e}")
+
+# ================= MAIN =================
 if __name__ == "__main__":
     load_state()
     reset_daily_loss_if_needed()
+    
     threading.Thread(target=background_scanner, daemon=True).start()
+    threading.Thread(target=background_monitor, daemon=True).start()
+    
     if bot:
-        threading.Thread(
-            target=lambda: bot.infinity_polling(timeout=10, long_polling_timeout=5),
-            daemon=True
-        ).start()
-    send_telegram("✅ *AI Trading Bot v19 is LIVE!*\nImprovements: MACD + ADX + Backtest + Thread-safe cache")
+        threading.Thread(target=lambda: bot.infinity_polling(), daemon=True).start()
+        logger.info("Telegram bot started")
+        send_telegram("✅ *Bot v28 Started - Full Commands*\n📊 7,500+ stocks | 3 Market Phases\n📈 Position sizing | Daily loss limit\n🔬 Backtest | 📊 Charts\n\nCommands: /status, /positions, /scan, /backtest, /close")
+    
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port)

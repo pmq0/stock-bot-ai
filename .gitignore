@@ -1,15 +1,10 @@
-# Environment variables (NEVER commit these)
-.env
-*.env
-
-# Python cache
 __pycache__/
 *.pyc
 *.pyo
-
-# Virtual environments
-venv/
-.venv/
-
-# Logs
 *.log
+state_v32.json
+.env
+venv/
+.DS_Store
+*.png
+*.jpg

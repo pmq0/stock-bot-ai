@@ -81,7 +81,7 @@ PHASE_SETTINGS = {
 
 logging.basicConfig(
     level=logging.INFO,
-    format=\'%(asctime)s - %(levelname)s - %(message)s\',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("bot_v28.log"),
         logging.StreamHandler()

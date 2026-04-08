@@ -224,10 +224,10 @@ def detect_accumulation(df):
     if len(df) < 30: return False, 0
     last_10 = df.tail(10)
     last_20 = df.tail(20)
-    price_change = abs((df[\'close\'].iloc[-1] - df[\'close\'].iloc[-20]) / (df[\'close\'].iloc[-20] + 1e-9))
+    price_change = abs((df['close'].iloc[-1] - df['close'].iloc[-20]) / (df['close'].iloc[-20] + 1e-9))
     price_stable = price_change < 0.015
-    volume_surge = last_10[\'volume\'].mean() > last_20[\'volume\'].mean() * 1.2
-    tight_range = (last_10[\'high\'].max() - last_10[\'low\'].min()) / (df[\'close\'].iloc[-1] + 1e-9) < 0.04
+    volume_surge = last_10['volume'].mean() > last_20['volume'].mean() * 1.2
+    tight_range = (last_10['high'].max() - last_10['low'].min()) / (df['close'].iloc[-1] + 1e-9) < 0.04
     acc_score = 0
     if price_stable: acc_score += 30
     if volume_surge: acc_score += 40
@@ -236,35 +236,35 @@ def detect_accumulation(df):
 
 def detect_pre_breakout(df):
     if len(df) < 20: return False
-    is_squeezing = df[\'bandwidth\'].iloc[-1] < df[\'bandwidth\'].iloc[-10] * 0.7
-    approaching = df[\'close\'].iloc[-1] > df[\'upper_band\'].iloc[-1] * 0.97
-    volume_surge = df[\'volume\'].iloc[-3:].mean() > df[\'volume\'].rolling(20).mean().iloc[-1] * 1.5
+    is_squeezing = df['bandwidth'].iloc[-1] < df['bandwidth'].iloc[-10] * 0.7
+    approaching = df['close'].iloc[-1] > df['upper_band'].iloc[-1] * 0.97
+    volume_surge = df['volume'].iloc[-3:].mean() > df['volume'].rolling(20).mean().iloc[-1] * 1.5
     return is_squeezing and approaching and volume_surge
 
 # ================= CHART GENERATION =================
 def generate_chart(symbol, df, entry, tp, sl, is_accumulating=False, is_pre_breakout=False):
     try:
         df_plot = df.tail(60).copy()
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={\'height_ratios\': [3, 1]})
-        ax1.plot(df_plot.index, df_plot[\'close\'], \'cyan\', linewidth=1.5, label=\'Price\')
-        ax1.plot(df_plot.index, df_plot[\'ema9\'], \'yellow\', linewidth=1, alpha=0.7, label=\'EMA 9\')
-        ax1.plot(df_plot.index, df_plot[\'ema21\'], \'orange\', linewidth=1, alpha=0.7, label=\'EMA 21\')
-        ax1.fill_between(df_plot.index, df_plot[\'upper_band\'], df_plot[\'lower_band\'], alpha=0.1, color=\'gray\', label=\'Bollinger Bands\')
-        ax1.axhline(y=entry, color=\'lime\', linestyle=\'--\', linewidth=1.5, label=f\'Entry ${entry:.2f}\\'')
-        ax1.axhline(y=tp, color=\'green\', linestyle=\'--\', linewidth=1.5, label=f\'TP ${tp:.2f}\\'')
-        ax1.axhline(y=sl, color=\'red\', linestyle=\'--\', linewidth=1.5, label=f\'SL ${sl:.2f}\\'')
-        if is_pre_breakout: ax1.axvspan(df_plot.index[-5], df_plot.index[-1], alpha=0.2, color=\'yellow\', label=\'Pre-Breakout\')
-        ax1.set_title(f\'{symbol} - Trading Signal\', fontsize=14, color=\'white\')
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
+        ax1.plot(df_plot.index, df_plot['close'], 'cyan', linewidth=1.5, label='Price')
+        ax1.plot(df_plot.index, df_plot['ema9'], 'yellow', linewidth=1, alpha=0.7, label='EMA 9')
+        ax1.plot(df_plot.index, df_plot['ema21'], 'orange', linewidth=1, alpha=0.7, label='EMA 21')
+        ax1.fill_between(df_plot.index, df_plot['upper_band'], df_plot['lower_band'], alpha=0.1, color='gray', label='Bollinger Bands')
+        ax1.axhline(y=entry, color='lime', linestyle='--', linewidth=1.5, label=f'Entry ${entry:.2f}')
+        ax1.axhline(y=tp, color='green', linestyle='--', linewidth=1.5, label=f'TP ${tp:.2f}')
+        ax1.axhline(y=sl, color='red', linestyle='--', linewidth=1.5, label=f'SL ${sl:.2f}')
+        if is_pre_breakout: ax1.axvspan(df_plot.index[-5], df_plot.index[-1], alpha=0.2, color='yellow', label='Pre-Breakout')
+        ax1.set_title(f'{symbol} - Trading Signal', fontsize=14, color='white')
         ax1.grid(True, alpha=0.15)
-        ax1.tick_params(colors=\'white\')
-        colors = [\'green\' if df_plot[\'close\'].iloc[i] >= df_plot[\'open\'].iloc[i] else \'red\' for i in range(len(df_plot))]
-        ax2.bar(df_plot.index, df_plot[\'volume\'], color=colors, alpha=0.7)
-        ax2.axhline(y=df_plot[\'vol_ma\'].iloc[-1], color=\'blue\', linestyle=\'--\', linewidth=1, label=\'Avg Volume\')
-        ax2.set_ylabel(\'Volume\', color=\'white\')
-        ax2.tick_params(colors=\'white\')
+        ax1.tick_params(colors='white')
+        colors = ['green' if df_plot['close'].iloc[i] >= df_plot['open'].iloc[i] else 'red' for i in range(len(df_plot))]
+        ax2.bar(df_plot.index, df_plot['volume'], color=colors, alpha=0.7)
+        ax2.axhline(y=df_plot['vol_ma'].iloc[-1], color='blue', linestyle='--', linewidth=1, label='Avg Volume')
+        ax2.set_ylabel('Volume', color='white')
+        ax2.tick_params(colors='white')
         plt.tight_layout()
         buf = io.BytesIO()
-        plt.savefig(buf, format=\'png\', dpi=100, facecolor=\'#0d1117\')
+        plt.savefig(buf, format='png', dpi=100, facecolor='#0d1117')
         buf.seek(0)
         plt.close(fig)
         return buf
@@ -274,16 +274,16 @@ def generate_chart(symbol, df, entry, tp, sl, is_accumulating=False, is_pre_brea
 
 # ================= YFINANCE WRAPPER WITH RETRY =================
 user_agents = [
-    \'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36\',
-    \'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36\',
-    \'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36\',
-    \'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/109.0.0.0 Safari/537.36\',
-    \'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/109.0.0.0\'
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/109.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/109.0.0.0'
 ]
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 def safe_yf_download(symbol, period, interval=None):
-    headers = {\'User-Agent\': random.choice(user_agents)}
+    headers = {'User-Agent': random.choice(user_agents)}
     # yfinance does not directly support custom headers for history() or download()
     # For now, we rely on yfinance's internal handling and retry mechanism.
     # If blocking becomes an issue, a custom requests-based fetch would be needed.
@@ -320,19 +320,19 @@ def process_symbol(symbol):
         is_pre_breakout = detect_pre_breakout(df)
         
         last = df.iloc[-1]
-        vol_surge = last[\'volume\'] > df[\'vol_ma\'].iloc[-1] * settings["vol_surge_mult"]
-        price_break = last[\'close\'] > df[\'high\'].iloc[-20:-1].max()
+        vol_surge = last['volume'] > df['vol_ma'].iloc[-1] * settings["vol_surge_mult"]
+        price_break = last['close'] > df['high'].iloc[-20:-1].max()
         score = 0
         if vol_surge: score += 40
         if price_break: score += 40
-        if 40 < last[\'rsi\'] < 70: score += 10
-        if last[\'ema9\'] > last[\'ema21\']: score += 10
+        if 40 < last['rsi'] < 70: score += 10
+        if last['ema9'] > last['ema21']: score += 10
         
         if score >= settings["min_score"]:
             now = time.time()
             last_seen = state["seen_signals"].get(symbol, 0)
             if now - last_seen > SIGNAL_COOLDOWN:
-                open_trade(symbol, last[\'close\'], score, df, is_accumulating, is_pre_breakout, phase, settings)
+                open_trade(symbol, last['close'], score, df, is_accumulating, is_pre_breakout, phase, settings)
                 with state_lock:
                     state["seen_signals"][symbol] = now
                     save_state()
@@ -348,7 +348,7 @@ def open_trade(symbol, price, score, df, is_accumulating=False, is_pre_breakout=
         save_state()
     chart = generate_chart(symbol, df, price, tp, sl, is_accumulating, is_pre_breakout)
     phase_emoji = "🟡" if phase == "PRE" else ("🔵" if phase == "AFTER" else "🟢")
-    caption = f"{phase_emoji} *EXPLOSION ALERT: {symbol}* ({phase})\n💰 Entry: ${price:.2f}\n🎯 TP: ${tp:.2f}\n🛑 SL: ${sl:.2f}\n📦 Size: {size}\n📊 Score: {score}/{settings[\'min_score\]}\n📋 {settings[\'description\]}"
+    caption = f"{phase_emoji} *EXPLOSION ALERT: {symbol}* ({phase})\n💰 Entry: ${price:.2f}\n🎯 TP: ${tp:.2f}\n🛑 SL: ${sl:.2f}\n📦 Size: {size}\n📊 Score: {score}/{settings['min_score']}\n📋 {settings['description']}"
     send_telegram(caption, photo=chart)
 
 def close_trade(symbol, price, reason):
@@ -364,16 +364,16 @@ def close_trade(symbol, price, reason):
         state["performance"]["total_pnl"] += pnl
         save_state()
     emoji = "🎉" if pnl > 0 else "🛑"
-    send_telegram(f"{emoji} *CLOSED: {symbol}*\n📝 {reason}\n💵 Exit: ${price:.2f}\n📈 PnL: ${pnl:+.2f} ({pnl_pct:+.2f}%)\n📊 Daily Loss: ${state.get(\'daily_loss\', 0):.2f}")
+    send_telegram(f"{emoji} *CLOSED: {symbol}*\n📝 {reason}\n💵 Exit: ${price:.2f}\n📈 PnL: ${pnl:+.2f} ({pnl_pct:+.2f}%)\n📊 Daily Loss: ${state.get('daily_loss', 0):.2f}")
 
 def update_trades():
     with state_lock:
         symbols = list(state["open_trades"].keys())
     for symbol in symbols:
         try:
-            df = safe_yf_download(symbol, period=\'1d\', interval=\'5m\')
+            df = safe_yf_download(symbol, period='1d', interval='5m')
             if df.empty: continue
-            price = df[\'Close\'].iloc[-1]
+            price = df['Close'].iloc[-1]
             with state_lock:
                 trade = state["open_trades"].get(symbol)
                 if not trade: continue
@@ -430,25 +430,25 @@ def background_monitor():
 
 # ================= TELEGRAM HANDLERS =================
 if bot:
-    @bot.message_handler(commands=[\'status\'])
+    @bot.message_handler(commands=['status'])
     def cmd_status(message):
         with state_lock:
             perf = state["performance"]
             total = perf["wins"] + perf["losses"]
             wr = (perf["wins"] / total * 100) if total > 0 else 0
-            msg = f"📊 *Bot Status (v28)*\n✅ Wins: {perf[\'wins\]}\n❌ Losses: {perf[\'losses\]}\n📈 Win Rate: {wr:.1f}%\n💵 Total PnL: ${perf[\'total_pnl\"]:+.2f}\n📦 Open: {len(state[\'open_trades\])}\n🌐 Universe: {len(state[\'tickers\])} stocks"
+            msg = f"📊 *Bot Status (v28)*\n✅ Wins: {perf['wins']}\n❌ Losses: {perf['losses']}\n📈 Win Rate: {wr:.1f}%\n💵 Total PnL: ${perf['total_pnl']:+.2f}\n📦 Open: {len(state['open_trades'])}\n🌐 Universe: {len(state['tickers'])} stocks"
         send_telegram(msg)
 
-    @bot.message_handler(commands=[\'positions\'])
+    @bot.message_handler(commands=['positions'])
     def cmd_positions(message):
         with state_lock:
             trades = state["open_trades"]
             if not trades: send_telegram("📭 No open positions"); return
             msg = "*Open Positions*\n"
-            for sym, t in trades.items(): msg += f"\n🔹 *{sym}* | Entry ${t[\'entry\\]:.2f} | TP ${t[\'tp\\]:.2f} | SL ${t[\'sl\\]:.2f}"
+            for sym, t in trades.items(): msg += f"\n🔹 *{sym}* | Entry ${t['entry']:.2f} | TP ${t['tp']:.2f} | SL ${t['sl']:.2f}"
         send_telegram(msg)
 
-    @bot.message_handler(commands=[\'close\'])
+    @bot.message_handler(commands=['close'])
     def cmd_close(message):
         try:
             args = message.text.split()
@@ -461,23 +461,23 @@ if bot:
                     send_telegram(f"❌ {symbol_to_close} is not an open position.")
                     return
             
-            df = safe_yf_download(symbol_to_close, period=\'1d\', interval=\'1m\')
+            df = safe_yf_download(symbol_to_close, period='1d', interval='1m')
             if df.empty:
                 send_telegram(f"❌ Could not fetch current price for {symbol_to_close}.")
                 return
-            current_price = df[\'Close\'].iloc[-1]
+            current_price = df['Close'].iloc[-1]
             close_trade(symbol_to_close, current_price, "Manual Close via Telegram")
             send_telegram(f"✅ Position for {symbol_to_close} closed successfully.")
         except Exception as e:
             logger.error(f"Error closing trade via Telegram: {e}")
             send_telegram("An error occurred while trying to close the position.")
 
-    @bot.message_handler(commands=[\'start\'])
+    @bot.message_handler(commands=['start'])
     def cmd_start(message):
         phase = get_market_phase()
         msg = f"👋 Welcome to your Advanced Trading Bot (v28)!\n\n"
-        msg += f"I\'m currently monitoring {len(state[\'tickers\'])} stocks across all US markets.\n"
-        msg += f"Current Market Phase: {PHASE_SETTINGS[phase][\'description\]}\n\n"
+        msg += f"I'm currently monitoring {len(state['tickers'])} stocks across all US markets.\n"
+        msg += f"Current Market Phase: {PHASE_SETTINGS[phase]['description']}\n\n"
         msg += f"Use /status to check performance.\n"
         msg += f"Use /positions to see open trades.\n"
         msg += f"Use /close <SYMBOL> to manually close a trade.\n\n"

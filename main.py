@@ -53,7 +53,7 @@ SL_PCT = 0.97
 # Fast Filter Thresholds
 MIN_PRICE = 0.7     # أقل سعر
 MAX_PRICE = 500    # أعلى سعر
-MIN_VOLUME = 150000 # أقل حجم تداول (يستخدم كحد أدنى عام)
+MIN_VOLUME = 50000 # أقل حجم تداول (يستخدم كحد أدنى عام)
 
 def fast_filter(symbol):
     try:
@@ -69,10 +69,10 @@ def fast_filter(symbol):
         
         # فلتر الحجم حسب السعر
         if price < 5:
-            if volume < 150000:  # Penny stocks
+            if volume < 50000:  # Penny stocks
                 return False
         elif price < 28:
-            if volume < 200000:  # Mid stocks
+            if volume < 100000:  # Mid stocks
                 return False
         else:
             if volume < 300000:  # Higher stocks

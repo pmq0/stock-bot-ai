@@ -50,10 +50,37 @@ TP_PCT = 1.06
 SL_PCT = 0.97
 
 # Fast Filter Thresholds
-MIN_PRICE = 1.0
-MAX_PRICE = 200.0
-MIN_VOLUME = 200000
+MIN_PRICE = 0.3     # أقل سعر
+MAX_PRICE = 32.0    # أعلى سعر
+MIN_VOLUME = 150000 # أقل حجم تداول (يستخدم كحد أدنى عام)
 
+def fast_filter(symbol):
+    try:
+        df = safe_download(symbol, period="1d")
+        if df.empty:
+            return False
+        price = df["close"].iloc[-1]
+        volume = df["volume"].iloc[-1]
+        
+        # فلتر السعر أولاً
+        if price < MIN_PRICE or price > MAX_PRICE:
+            return False
+        
+        # فلتر الحجم حسب السعر
+        if price < 5:
+            if volume < 150000:  # Penny stocks
+                return False
+        elif price < 20:
+            if volume < 200000:  # Mid stocks
+                return False
+        else:
+            if volume < 300000:  # Higher stocks
+                return False
+        
+        return True
+        
+    except:
+        return False
 # ================= MARKET PHASE SETTINGS =================
 PHASE_SETTINGS = {
     "PRE": {"min_score": 80, "size_multiplier": 0.5, "vol_surge_mult": 2.5, "description": "🟡 Pre-Market"},
@@ -580,7 +607,38 @@ if bot:
             send_telegram(msg)
         except Exception as e:
             send_telegram(f"❌ Error: {e}")
-
+            
+@bot.message_handler(commands=['news'])
+def cmd_news(message):
+    try:
+        args = message.text.split()
+        if len(args) != 2:
+            send_telegram("Usage: /news <SYMBOL>")
+            return
+        symbol = args[1].upper()
+        
+        # جلب أخبار السهم من Yahoo Finance
+        url = f"https://query1.finance.yahoo.com/v1/finance/search?q={symbol}"
+        response = requests.get(url, impersonate="chrome120", timeout=10)
+        data = response.json()
+        
+        news = data.get('news', [])
+        if not news:
+            send_telegram(f"📰 No news found for {symbol}")
+            return
+        
+        msg = f"📰 *Latest News: {symbol}*\n\n"
+        for item in news[:5]:
+            title = item.get('title', 'No title')
+            link = item.get('link', '#')
+            publisher = item.get('publisher', 'Unknown')
+            msg += f"• **{publisher}**\n"
+            msg += f"  [{title}]({link})\n\n"
+        
+        send_telegram(msg)
+        
+    except Exception as e:
+        send_telegram(f"❌ Error: {e}")
 # ================= MAIN =================
 if __name__ == "__main__":
     load_state()

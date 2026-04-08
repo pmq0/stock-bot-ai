@@ -27,24 +27,27 @@ STATE_DIR = os.getenv("STATE_DIR", ".")
 
 # Trading Parameters
 CAPITAL = 10000.0
-RISK_PER_TRADE = 0.02  # 2% risk per trade
+RISK_PER_TRADE = 0.02
 MAX_OPEN_TRADES = 15
 SIGNAL_COOLDOWN = 3600
 DAILY_LOSS_LIMIT = 300.0
-STATE_FILE = os.path.join(STATE_DIR, "state_v28.json")
+STATE_FILE = os.path.join(STATE_DIR, "state_v29.json")
 
 # Balanced Speed & Safety Settings
-SCAN_INTERVAL_SEC = 600  # 10 minutes
+SCAN_INTERVAL_SEC = 600
 CHUNK_SIZE = 200
 FAST_FILTER_WORKERS = 5
 DEEP_ANALYSIS_WORKERS = 3
-DELAY_BETWEEN_REQUESTS = 0.5  # Delay per request in fast filter
-BREAK_BETWEEN_CHUNKS = 5  # Delay between processing chunks
+DELAY_BETWEEN_REQUESTS = 0.5
+BREAK_BETWEEN_CHUNKS = 5
 TRADE_MONITOR_INTERVAL = 60
 
+# Telegram delay to avoid 429 error
+TELEGRAM_DELAY = 1.0  # 1 second between messages
+
 # Strategy Parameters
-TP_PCT = 1.05  # 5% Target
-SL_PCT = 0.97  # 3% Stop Loss
+TP_PCT = 1.05
+SL_PCT = 0.97
 
 # Fast Filter Thresholds
 MIN_PRICE = 1.0
@@ -83,7 +86,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("bot_v28.log"),
+        logging.FileHandler("bot_v29.log"),
         logging.StreamHandler()
     ]
 )
@@ -179,16 +182,28 @@ def update_all_tickers():
         logger.error(f"Ticker update error: {e}")
         return state.get("tickers", [])
 
-# ================= TELEGRAM HELPERS =================
+# ================= TELEGRAM HELPERS (with delay to avoid 429) =================
+_last_telegram_time = 0
+_telegram_lock = threading.Lock()
+
 def send_telegram(message, photo=None):
+    global _last_telegram_time
     if bot and CHAT_ID:
-        try:
-            if photo:
-                bot.send_photo(CHAT_ID, photo, caption=message, parse_mode='Markdown')
-            else:
-                bot.send_message(CHAT_ID, message, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Telegram error: {e}")
+        with _telegram_lock:
+            # Calculate delay needed
+            now = time.time()
+            elapsed = now - _last_telegram_time
+            if elapsed < TELEGRAM_DELAY:
+                time.sleep(TELEGRAM_DELAY - elapsed)
+            
+            try:
+                if photo:
+                    bot.send_photo(CHAT_ID, photo, caption=message, parse_mode='Markdown')
+                else:
+                    bot.send_message(CHAT_ID, message, parse_mode='Markdown')
+                _last_telegram_time = time.time()
+            except Exception as e:
+                logger.error(f"Telegram error: {e}")
 
 # ================= RISK MANAGEMENT =================
 def calculate_position_size(price):
@@ -283,10 +298,6 @@ user_agents = [
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 def safe_yf_download(symbol, period, interval=None):
-    headers = {'User-Agent': random.choice(user_agents)}
-    # yfinance does not directly support custom headers for history() or download()
-    # For now, we rely on yfinance's internal handling and retry mechanism.
-    # If blocking becomes an issue, a custom requests-based fetch would be needed.
     if interval:
         return yf.Ticker(symbol).history(period=period, interval=interval)
     else:
@@ -397,23 +408,21 @@ def background_scanner():
                 for i in range(0, len(tickers), CHUNK_SIZE):
                     chunk = tickers[i:i+CHUNK_SIZE]
                     
-                    # Stage 1: Fast Filter (Parallel with controlled workers and delay)
                     filtered = []
                     with ThreadPoolExecutor(max_workers=FAST_FILTER_WORKERS) as executor:
                         future_to_sym = {executor.submit(fast_filter, sym): sym for sym in chunk}
                         for future in as_completed(future_to_sym):
                             if future.result():
                                 filtered.append(future_to_sym[future])
-                            time.sleep(DELAY_BETWEEN_REQUESTS / FAST_FILTER_WORKERS) # Distribute delay
+                            time.sleep(DELAY_BETWEEN_REQUESTS / FAST_FILTER_WORKERS)
                     
                     logger.info(f"Chunk {i//CHUNK_SIZE + 1}: {len(filtered)}/{len(chunk)} passed fast filter")
                     
-                    # Stage 2: Deep Analysis (Parallel with controlled workers)
                     if filtered:
                         with ThreadPoolExecutor(max_workers=DEEP_ANALYSIS_WORKERS) as executor:
                             executor.map(process_symbol, filtered)
                     
-                    time.sleep(BREAK_BETWEEN_CHUNKS) # Delay between chunks
+                    time.sleep(BREAK_BETWEEN_CHUNKS)
             time.sleep(SCAN_INTERVAL_SEC)
         except Exception as e:
             logger.error(f"Scanner error: {e}")
@@ -436,7 +445,7 @@ if bot:
             perf = state["performance"]
             total = perf["wins"] + perf["losses"]
             wr = (perf["wins"] / total * 100) if total > 0 else 0
-            msg = f"📊 *Bot Status (v28)*\n✅ Wins: {perf['wins']}\n❌ Losses: {perf['losses']}\n📈 Win Rate: {wr:.1f}%\n💵 Total PnL: ${perf['total_pnl']:+.2f}\n📦 Open: {len(state['open_trades'])}\n🌐 Universe: {len(state['tickers'])} stocks"
+            msg = f"📊 *Bot Status (v29)*\n✅ Wins: {perf['wins']}\n❌ Losses: {perf['losses']}\n📈 Win Rate: {wr:.1f}%\n💵 Total PnL: ${perf['total_pnl']:+.2f}\n📦 Open: {len(state['open_trades'])}\n🌐 Universe: {len(state['tickers'])} stocks"
         send_telegram(msg)
 
     @bot.message_handler(commands=['positions'])
@@ -475,7 +484,7 @@ if bot:
     @bot.message_handler(commands=['start'])
     def cmd_start(message):
         phase = get_market_phase()
-        msg = f"👋 Welcome to your Advanced Trading Bot (v28)!\n\n"
+        msg = f"👋 Welcome to your Advanced Trading Bot (v29)!\n\n"
         msg += f"I'm currently monitoring {len(state['tickers'])} stocks across all US markets.\n"
         msg += f"Current Market Phase: {PHASE_SETTINGS[phase]['description']}\n\n"
         msg += f"Use /status to check performance.\n"
@@ -491,5 +500,5 @@ if __name__ == "__main__":
     if bot:
         threading.Thread(target=lambda: bot.infinity_polling(), daemon=True).start()
         logger.info("Telegram bot started")
-        send_telegram("✅ *Bot v28 Final Started*\nBalanced Speed & Safety + Charts + Risk Management + Market Phases Enabled")
+        send_telegram("✅ *Bot v29 Started*\nFixed Telegram rate limiting + Balanced Speed & Safety + Charts + Risk Management")
     app.run(host="0.0.0.0", port=5000)

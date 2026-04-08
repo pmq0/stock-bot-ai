@@ -15,7 +15,7 @@ import yfinance as yf
 import ftplib
 import io
 import matplotlib
-matplotlib.use(\'Agg\')
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import random
 from tenacity import retry, stop_after_attempt, wait_exponential

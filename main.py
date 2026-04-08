@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import yfinance as yf
 import ftplib
 import io
+import urllib.request
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -31,7 +32,7 @@ RISK_PER_TRADE = 0.02
 MAX_OPEN_TRADES = 15
 SIGNAL_COOLDOWN = 3600
 DAILY_LOSS_LIMIT = 300.0
-STATE_FILE = os.path.join(STATE_DIR, "state_v29.json")
+STATE_FILE = os.path.join(STATE_DIR, "state_v31.json")
 
 # Balanced Speed & Safety Settings
 SCAN_INTERVAL_SEC = 600
@@ -43,7 +44,7 @@ BREAK_BETWEEN_CHUNKS = 5
 TRADE_MONITOR_INTERVAL = 60
 
 # Telegram delay to avoid 429 error
-TELEGRAM_DELAY = 1.0  # 1 second between messages
+TELEGRAM_DELAY = 1.0
 
 # Strategy Parameters
 TP_PCT = 1.05
@@ -86,7 +87,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("bot_v29.log"),
+        logging.FileHandler("bot_v31.log"),
         logging.StreamHandler()
     ]
 )
@@ -152,37 +153,90 @@ def reset_daily_loss_if_needed():
             state["last_reset"] = today
             save_state()
 
-# ================= TICKER DISCOVERY =================
-def update_all_tickers():
+# ================= FALLBACK UNIVERSE SOURCES =================
+def get_fallback_from_github():
+    """جلب قائمة الأسهم من GitHub (بدون تكرار)"""
     try:
-        logger.info("Fetching latest ticker list from NASDAQ FTP...")
+        url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
+        response = urllib.request.urlopen(url, timeout=15)
+        tickers = response.read().decode('utf-8').splitlines()
+        clean = [t.strip().upper() for t in tickers if t.strip() and len(t.strip()) <= 5 and t.strip().isalpha()]
+        clean = list(dict.fromkeys(clean))
+        logger.info(f"GitHub fallback: {len(clean)} unique symbols")
+        return clean[:2000]
+    except Exception as e:
+        logger.error(f"GitHub fallback error: {e}")
+        return []
+
+# قائمة احتياطية صغيرة (آخر خط)
+MINIMAL_UNIVERSE = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX",
+    "INTC", "PLTR", "SOFI", "NIO", "GME", "AMC", "RIOT", "MARA", "COIN", "HOOD",
+    "MSTR", "AFRM", "UPST", "SNDL", "TLRY", "ACB", "BYND", "PLUG", "FCEL", "SPCE",
+    "RIVN", "LCID", "QS", "CLSK", "HUT", "BITF", "BTBT", "CAN", "SDIG", "WULF"
+]
+
+def update_all_tickers():
+    """تحديث قائمة الأسهم من مصادر متعددة (NASDAQ FTP -> GitHub -> Minimal)"""
+    global state
+    tickers = []
+    
+    # ========== المصدر 1: NASDAQ FTP ==========
+    try:
+        logger.info("🔄 Source 1: Fetching from NASDAQ FTP...")
         ftp = ftplib.FTP("ftp.nasdaqtrader.com")
         ftp.login()
         ftp.cwd("SymbolDirectory")
-        tickers = []
+        
         r_nasdaq = io.BytesIO()
         ftp.retrbinary("RETR nasdaqlisted.txt", r_nasdaq.write)
         r_nasdaq.seek(0)
         df_nasdaq = pd.read_csv(r_nasdaq, sep="|")
         tickers.extend(df_nasdaq["Symbol"].dropna().tolist())
+        
         r_other = io.BytesIO()
         ftp.retrbinary("RETR otherlisted.txt", r_other.write)
         r_other.seek(0)
         df_other = pd.read_csv(r_other, sep="|")
         tickers.extend(df_other["NASDAQ Symbol"].dropna().tolist())
         ftp.quit()
-        clean_tickers = sorted(list(set([t for t in tickers if str(t).isalpha() and len(str(t)) <= 5])))
+        
+        clean = [t for t in tickers if str(t).isalpha() and 1 <= len(str(t)) <= 5]
+        clean = list(dict.fromkeys(clean))
+        
+        if len(clean) > 100:
+            with state_lock:
+                state["tickers"] = clean
+                state["last_ticker_update"] = datetime.now().isoformat()
+                save_state()
+            logger.info(f"✅ NASDAQ FTP: {len(clean)} symbols")
+            send_telegram(f"📊 Universe updated: {len(clean)} stocks (NASDAQ FTP)")
+            return clean
+    except Exception as e:
+        logger.error(f"NASDAQ FTP failed: {e}")
+    
+    # ========== المصدر 2: GitHub Fallback ==========
+    logger.info("🔄 Source 2: Fetching from GitHub fallback...")
+    github_tickers = get_fallback_from_github()
+    if github_tickers and len(github_tickers) > 100:
         with state_lock:
-            state["tickers"] = clean_tickers
+            state["tickers"] = github_tickers
             state["last_ticker_update"] = datetime.now().isoformat()
             save_state()
-        logger.info(f"Successfully updated ticker list: {len(clean_tickers)} symbols found.")
-        return clean_tickers
-    except Exception as e:
-        logger.error(f"Ticker update error: {e}")
-        return state.get("tickers", [])
+        logger.info(f"✅ GitHub fallback: {len(github_tickers)} symbols")
+        send_telegram(f"📊 Universe updated: {len(github_tickers)} stocks (GitHub fallback)")
+        return github_tickers
+    
+    # ========== المصدر 3: Minimal Universe ==========
+    logger.warning(f"🔄 Source 3: Using minimal universe ({len(MINIMAL_UNIVERSE)} symbols)")
+    with state_lock:
+        state["tickers"] = MINIMAL_UNIVERSE
+        state["last_ticker_update"] = datetime.now().isoformat()
+        save_state()
+    send_telegram(f"⚠️ Using minimal universe: {len(MINIMAL_UNIVERSE)} stocks")
+    return MINIMAL_UNIVERSE
 
-# ================= TELEGRAM HELPERS (with delay to avoid 429) =================
+# ================= TELEGRAM HELPERS =================
 _last_telegram_time = 0
 _telegram_lock = threading.Lock()
 
@@ -190,12 +244,10 @@ def send_telegram(message, photo=None):
     global _last_telegram_time
     if bot and CHAT_ID:
         with _telegram_lock:
-            # Calculate delay needed
             now = time.time()
             elapsed = now - _last_telegram_time
             if elapsed < TELEGRAM_DELAY:
                 time.sleep(TELEGRAM_DELAY - elapsed)
-            
             try:
                 if photo:
                     bot.send_photo(CHAT_ID, photo, caption=message, parse_mode='Markdown')
@@ -347,7 +399,8 @@ def process_symbol(symbol):
                 with state_lock:
                     state["seen_signals"][symbol] = now
                     save_state()
-    except Exception: pass
+    except Exception as e:
+        pass
 
 # ================= TRADE MANAGEMENT =================
 def open_trade(symbol, price, score, df, is_accumulating=False, is_pre_breakout=False, phase="REGULAR", settings=None):
@@ -390,18 +443,25 @@ def update_trades():
                 if not trade: continue
                 if price >= trade["tp"]: close_trade(symbol, price, "TAKE PROFIT")
                 elif price <= trade["sl"]: close_trade(symbol, price, "STOP LOSS")
-        except: pass
+        except:
+            pass
 
 # ================= SCANNER ENGINE =================
 def background_scanner():
+    # تحديث القائمة أول مرة
+    update_all_tickers()
+    
     while True:
         try:
             phase = get_market_phase()
             if phase != "CLOSED":
                 with state_lock:
-                    if not state["tickers"] or (state["last_ticker_update"] and (datetime.now() - datetime.fromisoformat(state["last_ticker_update"])).days >= 1):
-                        update_all_tickers()
                     tickers = list(state["tickers"])
+                
+                if not tickers:
+                    logger.error("No tickers available, updating...")
+                    update_all_tickers()
+                    continue
                 
                 logger.info(f"Starting scan of {len(tickers)} symbols - Phase: {phase}")
                 
@@ -431,61 +491,18 @@ def background_scanner():
 def background_monitor():
     while True:
         try:
-            if get_market_phase() != "CLOSED": update_trades()
+            if get_market_phase() != "CLOSED":
+                update_trades()
             time.sleep(TRADE_MONITOR_INTERVAL)
         except Exception as e:
             logger.error(f"Monitor error: {e}")
-            time.sleep(30)
-
-# ================= TELEGRAM HANDLERS =================
-if bot:
-    @bot.message_handler(commands=['status'])
-    def cmd_status(message):
-        with state_lock:
-            perf = state["performance"]
-            total = perf["wins"] + perf["losses"]
-            wr = (perf["wins"] / total * 100) if total > 0 else 0
-            msg = f"📊 *Bot Status (v29)*\n✅ Wins: {perf['wins']}\n❌ Losses: {perf['losses']}\n📈 Win Rate: {wr:.1f}%\n💵 Total PnL: ${perf['total_pnl']:+.2f}\n📦 Open: {len(state['open_trades'])}\n🌐 Universe: {len(state['tickers'])} stocks"
-        send_telegram(msg)
-
-    @bot.message_handler(commands=['positions'])
-    def cmd_positions(message):
-        with state_lock:
-            trades = state["open_trades"]
-            if not trades: send_telegram("📭 No open positions"); return
-            msg = "*Open Positions*\n"
-            for sym, t in trades.items(): msg += f"\n🔹 *{sym}* | Entry ${t['entry']:.2f} | TP ${t['tp']:.2f} | SL ${t['sl']:.2f}"
-        send_telegram(msg)
-
-    @bot.message_handler(commands=['close'])
-    def cmd_close(message):
-        try:
-            args = message.text.split()
-            if len(args) != 2:
-                send_telegram("Usage: /close <SYMBOL>")
-                return
-            symbol_to_close = args[1].upper()
-            with state_lock:
-                if symbol_to_close not in state["open_trades"]:
-                    send_telegram(f"❌ {symbol_to_close} is not an open position.")
-                    return
-            
-            df = safe_yf_download(symbol_to_close, period='1d', interval='1m')
-            if df.empty:
-                send_telegram(f"❌ Could not fetch current price for {symbol_to_close}.")
-                return
-            current_price = df['Close'].iloc[-1]
-            close_trade(symbol_to_close, current_price, "Manual Close via Telegram")
-            send_telegram(f"✅ Position for {symbol_to_close} closed successfully.")
-        except Exception as e:
-            logger.error(f"Error closing trade via Telegram: {e}")
             send_telegram("An error occurred while trying to close the position.")
 
     @bot.message_handler(commands=['start'])
     def cmd_start(message):
         phase = get_market_phase()
-        msg = f"👋 Welcome to your Advanced Trading Bot (v29)!\n\n"
-        msg += f"I'm currently monitoring {len(state['tickers'])} stocks across all US markets.\n"
+        msg = f"👋 Welcome to AI Trading Bot v31!\n\n"
+        msg += f"I'm currently monitoring {len(state['tickers'])} stocks.\n"
         msg += f"Current Market Phase: {PHASE_SETTINGS[phase]['description']}\n\n"
         msg += f"Use /status to check performance.\n"
         msg += f"Use /positions to see open trades.\n"
@@ -500,5 +517,5 @@ if __name__ == "__main__":
     if bot:
         threading.Thread(target=lambda: bot.infinity_polling(), daemon=True).start()
         logger.info("Telegram bot started")
-        send_telegram("✅ *Bot v29 Started*\nFixed Telegram rate limiting + Balanced Speed & Safety + Charts + Risk Management")
+        send_telegram("✅ *Bot v31 Started*\nMulti-source universe + Charts + Risk Management")
     app.run(host="0.0.0.0", port=5000)

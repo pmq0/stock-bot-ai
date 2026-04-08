@@ -1,3 +1,4 @@
+from deep_translator import GoogleTranslator
 import os
 import time
 import json
@@ -617,7 +618,6 @@ def cmd_news(message):
             return
         symbol = args[1].upper()
         
-        # جلب أخبار السهم من Yahoo Finance
         url = f"https://query1.finance.yahoo.com/v1/finance/search?q={symbol}"
         response = requests.get(url, impersonate="chrome120", timeout=10)
         data = response.json()
@@ -627,18 +627,64 @@ def cmd_news(message):
             send_telegram(f"📰 No news found for {symbol}")
             return
         
-        msg = f"📰 *Latest News: {symbol}*\n\n"
+        translator = GoogleTranslator(source='en', target='ar')
+        msg = f"📰 *أخبار {symbol}*\n\n"
+        
+        # كلمات للتحليل
+        positive_words = ['surge', 'gain', 'rise', 'up', 'growth', 'partnership', 'patent', 'expansion', 'profit', 'record', 'high', 'positive', 'opportunity', 'breakthrough', 'launch', 'award', 'contract', 'deal']
+        negative_words = ['layoff', 'sell', 'drop', 'down', 'loss', 'reverse', 'investigation', 'lawsuit', 'cut', 'decline', 'fall', 'low', 'negative', 'risk', 'warning', 'sue', 'fine', 'penalty']
+        
+        positive_count = 0
+        negative_count = 0
+        neutral_count = 0
+        
         for item in news[:5]:
             title = item.get('title', 'No title')
             link = item.get('link', '#')
             publisher = item.get('publisher', 'Unknown')
-            msg += f"• **{publisher}**\n"
-            msg += f"  [{title}]({link})\n\n"
+            
+            # ترجمة العنوان
+            try:
+                title_ar = translator.translate(title)
+            except:
+                title_ar = title
+            
+            # تحليل المشاعر
+            title_lower = title.lower()
+            is_positive = any(word in title_lower for word in positive_words)
+            is_negative = any(word in title_lower for word in negative_words)
+            
+            if is_positive and not is_negative:
+                emoji = "🟢"
+                positive_count += 1
+            elif is_negative:
+                emoji = "🔴"
+                negative_count += 1
+            else:
+                emoji = "🟡"
+                neutral_count += 1
+            
+            msg += f"{emoji} **{publisher}**\n"
+            msg += f"  {title_ar}\n"
+            msg += f"  [رابط الخبر]({link})\n\n"
+        
+        # إضافة التحليل النهائي
+        msg += f"\n📊 *تحليل الأخبار:*\n"
+        msg += f"🟢 إيجابي: {positive_count}\n"
+        msg += f"🔴 سلبي: {negative_count}\n"
+        msg += f"🟡 محايد: {neutral_count}\n\n"
+        
+        if positive_count > negative_count:
+            msg += f"✅ *الخلاصة: أخبار إيجابية* 👍"
+        elif negative_count > positive_count:
+            msg += f"⚠️ *الخلاصة: أخبار سلبية - كن حذراً* 👎"
+        else:
+            msg += f"🟡 *الخلاصة: أخبار محايدة*"
         
         send_telegram(msg)
         
     except Exception as e:
-        send_telegram(f"❌ Error: {e}")
+        send_telegram(f"❌ خطأ: {e}")
 # ================= MAIN =================
 if __name__ == "__main__":
     load_state()

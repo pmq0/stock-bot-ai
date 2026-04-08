@@ -3,23 +3,25 @@ import time
 import json
 import logging
 import threading
-import requests
-import numpy as np
-import pandas as pd
-from datetime import datetime, timedelta
-from flask import Flask, request
-import telebot
-import pytz
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import yfinance as yf
-import ftplib
+import asyncio
 import io
 import urllib.request
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import random
+
+import pandas as pd
+import numpy as np
+import pytz
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import random
+from flask import Flask
+import telebot
 from tenacity import retry, stop_after_attempt, wait_exponential
+from curl_cffi import requests
+import aiohttp
+import ftplib
 
 # ================= CONFIGURATION =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -34,21 +36,20 @@ SIGNAL_COOLDOWN = 3600
 DAILY_LOSS_LIMIT = 300.0
 STATE_FILE = os.path.join(STATE_DIR, "state_v32.json")
 
-# Balanced Speed & Safety Settings
-SCAN_INTERVAL_SEC = 600
-CHUNK_SIZE = 200
+# Scanner Settings - مع 12,000 سهم
+SCAN_INTERVAL_SEC = 900  # 15 دقيقة بين كل مسحة كاملة
+CHUNK_SIZE = 100  # 100 سهم لكل شانك
 FAST_FILTER_WORKERS = 5
 DEEP_ANALYSIS_WORKERS = 3
-DELAY_BETWEEN_REQUESTS = 0.5
+DELAY_BETWEEN_REQUESTS = 0.3  # 300ms بين الطلبات
 BREAK_BETWEEN_CHUNKS = 5
 TRADE_MONITOR_INTERVAL = 60
 
-# Telegram delay to avoid 429 error
 TELEGRAM_DELAY = 1.0
 
-# Strategy Parameters
-TP_PCT = 1.05
-SL_PCT = 0.97
+# Strategy Parameters (Risk/Reward 1:2)
+TP_PCT = 1.06   # +6%
+SL_PCT = 0.97   # -3%
 
 # Fast Filter Thresholds
 MIN_PRICE = 1.0
@@ -57,39 +58,16 @@ MIN_VOLUME = 200000
 
 # ================= MARKET PHASE SETTINGS =================
 PHASE_SETTINGS = {
-    "PRE": {
-        "min_score": 80,
-        "size_multiplier": 0.5,
-        "vol_surge_mult": 2.5,
-        "description": "🟡 Pre-Market - High risk, low liquidity"
-    },
-    "REGULAR": {
-        "min_score": 70,
-        "size_multiplier": 1.0,
-        "vol_surge_mult": 2.0,
-        "description": "🟢 Regular Hours - Normal trading"
-    },
-    "AFTER": {
-        "min_score": 85,
-        "size_multiplier": 0.3,
-        "vol_surge_mult": 3.0,
-        "description": "🔵 After-Hours - Very high risk"
-    },
-    "CLOSED": {
-        "min_score": 999,
-        "size_multiplier": 0,
-        "vol_surge_mult": 0,
-        "description": "⚫ Market Closed"
-    }
+    "PRE": {"min_score": 80, "size_multiplier": 0.5, "vol_surge_mult": 2.5, "description": "🟡 Pre-Market"},
+    "REGULAR": {"min_score": 70, "size_multiplier": 1.0, "vol_surge_mult": 2.0, "description": "🟢 Regular Hours"},
+    "AFTER": {"min_score": 85, "size_multiplier": 0.3, "vol_surge_mult": 3.0, "description": "🔵 After-Hours"},
+    "CLOSED": {"min_score": 999, "size_multiplier": 0, "vol_surge_mult": 0, "description": "⚫ Market Closed"}
 }
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("bot_v32.log"),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()]
 )
 logger = logging.getLogger()
 
@@ -102,7 +80,6 @@ state = {
     "open_trades": {},
     "performance": {"wins": 0, "losses": 0, "total_pnl": 0.0},
     "seen_signals": {},
-    "last_accumulation": {},
     "daily_loss": 0.0,
     "last_reset": None,
     "tickers": [],
@@ -111,7 +88,7 @@ state = {
 
 EASTERN_TZ = pytz.timezone("US/Eastern")
 
-def now_est() -> datetime:
+def now_est():
     return datetime.now(EASTERN_TZ)
 
 def get_market_phase():
@@ -153,32 +130,134 @@ def reset_daily_loss_if_needed():
             state["last_reset"] = today
             save_state()
 
-# ================= FALLBACK UNIVERSE SOURCES =================
-def get_fallback_from_github():
-    try:
-        url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
-        response = urllib.request.urlopen(url, timeout=15)
-        tickers = response.read().decode('utf-8').splitlines()
-        clean = [t.strip().upper() for t in tickers if t.strip() and len(t.strip()) <= 5 and t.strip().isalpha()]
-        clean = list(dict.fromkeys(clean))
-        logger.info(f"GitHub fallback: {len(clean)} unique symbols")
-        return clean[:2000]
-    except Exception as e:
-        logger.error(f"GitHub fallback error: {e}")
-        return []
+# ================= NEW: ROBUST DATA FETCHER (NO BLOCKING) =================
+class StockDataFetcher:
+    """يجلب البيانات من Yahoo بدون حظر - يدعم آلاف الأسهم"""
+    
+    def __init__(self):
+        self.session = None
+    
+    async def get_session(self):
+        if self.session is None:
+            self.session = aiohttp.ClientSession(
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/json',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                }
+            )
+        return self.session
+    
+    async def fetch_chart_data(self, symbol, period="5d", interval="15m"):
+        """جلب بيانات الشارت من Yahoo Finance"""
+        try:
+            # تحويل الفترة إلى أيام
+            days_map = {"5d": 5, "1d": 1, "10d": 10, "1mo": 30}
+            days = days_map.get(period, 5)
+            
+            end_date = int(datetime.now().timestamp())
+            start_date = int((datetime.now() - timedelta(days=days)).timestamp())
+            
+            # خريطة الفواصل
+            interval_map = {"15m": "15m", "5m": "5m", "1d": "1d", "1h": "60m"}
+            yf_interval = interval_map.get(interval, "15m")
+            
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={yf_interval}&period1={start_date}&period2={end_date}"
+            
+            session = await self.get_session()
+            
+            for attempt in range(3):
+                try:
+                    async with session.get(url, timeout=15) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            return self._parse_chart_response(data)
+                        elif response.status == 429:
+                            await asyncio.sleep(5 * (attempt + 1))
+                        else:
+                            await asyncio.sleep(1)
+                except Exception as e:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(2)
+            
+            return None
+        except Exception as e:
+            logger.debug(f"Fetch error for {symbol}: {e}")
+            return None
+    
+    def _parse_chart_response(self, data):
+        """تحويل استجابة Yahoo إلى DataFrame"""
+        try:
+            if 'chart' not in data or 'result' not in data['chart'] or not data['chart']['result']:
+                return None
+            
+            result = data['chart']['result'][0]
+            timestamps = result.get('timestamp', [])
+            quote = result.get('indicators', {}).get('quote', [{}])[0]
+            
+            if not timestamps or not quote:
+                return None
+            
+            df = pd.DataFrame({
+                'timestamp': pd.to_datetime(timestamps, unit='s'),
+                'open': quote.get('open', []),
+                'high': quote.get('high', []),
+                'low': quote.get('low', []),
+                'close': quote.get('close', []),
+                'volume': quote.get('volume', [])
+            })
+            
+            df = df.dropna()
+            if df.empty:
+                return None
+            
+            df.set_index('timestamp', inplace=True)
+            return df
+        except Exception as e:
+            logger.debug(f"Parse error: {e}")
+            return None
+    
+    async def close(self):
+        if self.session:
+            await self.session.close()
 
+# Global fetcher instance
+_fetcher = None
+_fetcher_lock = threading.Lock()
+
+def get_fetcher():
+    global _fetcher
+    if _fetcher is None:
+        _fetcher = StockDataFetcher()
+    return _fetcher
+
+def safe_download(symbol, period="5d", interval="15m"):
+    """واجهة متزامنة لجلب البيانات - تعمل بدون حظر"""
+    try:
+        fetcher = get_fetcher()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(fetcher.fetch_chart_data(symbol, period, interval))
+        loop.close()
+        return result if result is not None else pd.DataFrame()
+    except Exception as e:
+        logger.error(f"Download error {symbol}: {e}")
+        return pd.DataFrame()
+
+# ================= FALLBACK UNIVERSE SOURCES =================
 MINIMAL_UNIVERSE = [
     "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX",
-    "INTC", "PLTR", "SOFI", "NIO", "GME", "AMC", "RIOT", "MARA", "COIN", "HOOD",
-    "MSTR", "AFRM", "UPST", "SNDL", "TLRY", "ACB", "BYND", "PLUG", "FCEL", "SPCE"
+    "INTC", "PLTR", "SOFI", "NIO", "GME", "AMC", "RIOT", "MARA", "COIN"
 ]
 
 def update_all_tickers():
+    """تحديث قائمة الأسهم - يحتفظ بـ 12,000 سهم"""
     global state
     tickers = []
     
     try:
-        logger.info("🔄 Source 1: Fetching from NASDAQ FTP...")
+        logger.info("🔄 Fetching from NASDAQ FTP...")
         ftp = ftplib.FTP("ftp.nasdaqtrader.com")
         ftp.login()
         ftp.cwd("SymbolDirectory")
@@ -204,27 +283,15 @@ def update_all_tickers():
                 state["tickers"] = clean
                 state["last_ticker_update"] = datetime.now().isoformat()
                 save_state()
-            logger.info(f"✅ NASDAQ FTP: {len(clean)} symbols")
+            logger.info(f"✅ Universe updated: {len(clean)} stocks")
             send_telegram(f"📊 Universe updated: {len(clean)} stocks")
             return clean
     except Exception as e:
         logger.error(f"NASDAQ FTP failed: {e}")
     
-    logger.info("🔄 Source 2: Fetching from GitHub fallback...")
-    github_tickers = get_fallback_from_github()
-    if github_tickers and len(github_tickers) > 100:
-        with state_lock:
-            state["tickers"] = github_tickers
-            state["last_ticker_update"] = datetime.now().isoformat()
-            save_state()
-        logger.info(f"✅ GitHub fallback: {len(github_tickers)} symbols")
-        send_telegram(f"📊 Universe updated: {len(github_tickers)} stocks")
-        return github_tickers
-    
-    logger.warning(f"🔄 Source 3: Using minimal universe ({len(MINIMAL_UNIVERSE)} symbols)")
+    logger.warning(f"Using minimal universe ({len(MINIMAL_UNIVERSE)} symbols)")
     with state_lock:
         state["tickers"] = MINIMAL_UNIVERSE
-        state["last_ticker_update"] = datetime.now().isoformat()
         save_state()
     return MINIMAL_UNIVERSE
 
@@ -253,7 +320,8 @@ def send_telegram(message, photo=None):
 def calculate_position_size(price):
     stop_loss = price * (1 - SL_PCT)
     risk_per_share = price - stop_loss
-    if risk_per_share <= 0: return 1
+    if risk_per_share <= 0:
+        return 1
     risk_amount = CAPITAL * RISK_PER_TRADE
     size = int(risk_amount / risk_per_share)
     return max(1, min(size, 100))
@@ -278,15 +346,16 @@ def compute_indicators(df):
     df["bandwidth"] = (df["upper_band"] - df["lower_band"]) / (df["sma"] + 1e-9)
     return df
 
-# ================= PATTERN DETECTION =================
 def detect_accumulation(df):
-    if len(df) < 30: return False, 0
-    last_10 = df.tail(10)
-    last_20 = df.tail(20)
-    price_change = abs((df['close'].iloc[-1] - df['close'].iloc[-20]) / (df['close'].iloc[-20] + 1e-9))
-    price_stable = price_change < 0.015
-    volume_surge = last_10['volume'].mean() > last_20['volume'].mean() * 1.2
-    tight_range = (last_10['high'].max() - last_10['low'].min()) / (df['close'].iloc[-1] + 1e-9) < 0.04
+    if len(df) < 60:
+        return False, 0
+    last_30 = df.tail(30)
+    last_60 = df.tail(60)
+    price_change_30 = abs((df['close'].iloc[-1] - df['close'].iloc[-30]) / (df['close'].iloc[-30] + 1e-9))
+    price_stable = price_change_30 < 0.03
+    volume_surge = last_30['volume'].mean() > last_60['volume'].mean() * 1.3
+    price_range = (last_30['high'].max() - last_30['low'].min()) / (df['close'].iloc[-1] + 1e-9)
+    tight_range = price_range < 0.05
     acc_score = 0
     if price_stable: acc_score += 30
     if volume_surge: acc_score += 40
@@ -294,13 +363,13 @@ def detect_accumulation(df):
     return acc_score >= 60, acc_score
 
 def detect_pre_breakout(df):
-    if len(df) < 20: return False
+    if len(df) < 20:
+        return False
     is_squeezing = df['bandwidth'].iloc[-1] < df['bandwidth'].iloc[-10] * 0.7
     approaching = df['close'].iloc[-1] > df['upper_band'].iloc[-1] * 0.97
     volume_surge = df['volume'].iloc[-3:].mean() > df['volume'].rolling(20).mean().iloc[-1] * 1.5
     return is_squeezing and approaching and volume_surge
 
-# ================= CHART GENERATION =================
 def generate_chart(symbol, df, entry, tp, sl, is_accumulating=False, is_pre_breakout=False):
     try:
         df_plot = df.tail(60).copy()
@@ -312,7 +381,8 @@ def generate_chart(symbol, df, entry, tp, sl, is_accumulating=False, is_pre_brea
         ax1.axhline(y=entry, color='lime', linestyle='--', linewidth=1.5, label=f'Entry ${entry:.2f}')
         ax1.axhline(y=tp, color='green', linestyle='--', linewidth=1.5, label=f'TP ${tp:.2f}')
         ax1.axhline(y=sl, color='red', linestyle='--', linewidth=1.5, label=f'SL ${sl:.2f}')
-        if is_pre_breakout: ax1.axvspan(df_plot.index[-5], df_plot.index[-1], alpha=0.2, color='yellow', label='Pre-Breakout')
+        if is_pre_breakout:
+            ax1.axvspan(df_plot.index[-5], df_plot.index[-1], alpha=0.2, color='yellow', label='Pre-Breakout')
         ax1.set_title(f'{symbol} - Trading Signal', fontsize=14, color='white')
         ax1.grid(True, alpha=0.15)
         ax1.tick_params(colors='white')
@@ -331,29 +401,17 @@ def generate_chart(symbol, df, entry, tp, sl, is_accumulating=False, is_pre_brea
         logger.error(f"Chart error: {e}")
         return None
 
-# ================= YFINANCE WRAPPER WITH RETRY =================
-user_agents = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
-]
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-def safe_yf_download(symbol, period, interval=None):
-    if interval:
-        return yf.Ticker(symbol).history(period=period, interval=interval)
-    else:
-        return yf.download(symbol, period=period, progress=False)
-
 # ================= FAST FILTER =================
 def fast_filter(symbol):
+    """فحص سريع - يستخدم الدالة الجديدة"""
     try:
-        df = safe_yf_download(symbol, period="1d")
-        if df.empty: return False
-        price = df["Close"].iloc[-1]
-        volume = df["Volume"].iloc[-1]
+        df = safe_download(symbol, period="1d")
+        if df.empty:
+            return False
+        price = df["close"].iloc[-1]
+        volume = df["volume"].iloc[-1]
         return MIN_PRICE < price < MAX_PRICE and volume > MIN_VOLUME
-    except: 
+    except:
         return False
 
 # ================= PROCESS SYMBOL =================
@@ -362,12 +420,15 @@ def process_symbol(symbol):
         reset_daily_loss_if_needed()
         phase = get_market_phase()
         settings = PHASE_SETTINGS.get(phase, PHASE_SETTINGS["CLOSED"])
-        if phase == "CLOSED": return
+        if phase == "CLOSED":
+            return
         with state_lock:
-            if symbol in state["open_trades"] or state.get("daily_loss", 0) >= DAILY_LOSS_LIMIT: return
+            if symbol in state["open_trades"] or state.get("daily_loss", 0) >= DAILY_LOSS_LIMIT:
+                return
         
-        df = safe_yf_download(symbol, period="5d", interval="15m")
-        if df.empty: return
+        df = safe_download(symbol, period="5d", interval="15m")
+        if df.empty:
+            return
         df.columns = [c.lower() for c in df.columns]
         df = compute_indicators(df)
         is_accumulating, acc_score = detect_accumulation(df)
@@ -377,10 +438,14 @@ def process_symbol(symbol):
         vol_surge = last['volume'] > df['vol_ma'].iloc[-1] * settings["vol_surge_mult"]
         price_break = last['close'] > df['high'].iloc[-20:-1].max()
         score = 0
-        if vol_surge: score += 40
-        if price_break: score += 40
-        if 40 < last['rsi'] < 70: score += 10
-        if last['ema9'] > last['ema21']: score += 10
+        if vol_surge:
+            score += 40
+        if price_break:
+            score += 40
+        if 40 < last['rsi'] < 70:
+            score += 10
+        if last['ema9'] > last['ema21']:
+            score += 10
         
         if score >= settings["min_score"]:
             now = time.time()
@@ -390,29 +455,31 @@ def process_symbol(symbol):
                 with state_lock:
                     state["seen_signals"][symbol] = now
                     save_state()
-    except Exception:
+    except Exception as e:
         pass
 
-# ================= TRADE MANAGEMENT =================
 def open_trade(symbol, price, score, df, is_accumulating=False, is_pre_breakout=False, phase="REGULAR", settings=None):
     with state_lock:
-        if state.get("daily_loss", 0) >= DAILY_LOSS_LIMIT or len(state["open_trades"]) >= MAX_OPEN_TRADES: return
+        if state.get("daily_loss", 0) >= DAILY_LOSS_LIMIT or len(state["open_trades"]) >= MAX_OPEN_TRADES:
+            return
         size = int(calculate_position_size(price) * settings["size_multiplier"])
         tp, sl = price * TP_PCT, price * SL_PCT
         state["open_trades"][symbol] = {"entry": price, "tp": tp, "sl": sl, "size": size, "time": time.time(), "score": score, "phase": phase}
         save_state()
     chart = generate_chart(symbol, df, price, tp, sl, is_accumulating, is_pre_breakout)
     phase_emoji = "🟡" if phase == "PRE" else ("🔵" if phase == "AFTER" else "🟢")
-    caption = f"{phase_emoji} *EXPLOSION ALERT: {symbol}* ({phase})\n💰 Entry: ${price:.2f}\n🎯 TP: ${tp:.2f}\n🛑 SL: ${sl:.2f}\n📦 Size: {size}\n📊 Score: {score}/{settings['min_score']}\n📋 {settings['description']}"
+    caption = f"{phase_emoji} *SIGNAL: {symbol}* ({phase})\n💰 Entry: ${price:.2f}\n🎯 TP: ${tp:.2f}\n🛑 SL: ${sl:.2f}\n📦 Size: {size}\n📊 Score: {score}/{settings['min_score']}\n📋 {settings['description']}"
     send_telegram(caption, photo=chart)
 
 def close_trade(symbol, price, reason):
     with state_lock:
-        if symbol not in state["open_trades"]: return
+        if symbol not in state["open_trades"]:
+            return
         trade = state["open_trades"].pop(symbol)
         pnl = (price - trade["entry"]) * trade["size"]
         pnl_pct = ((price - trade["entry"]) / trade["entry"]) * 100
-        if pnl > 0: state["performance"]["wins"] += 1
+        if pnl > 0:
+            state["performance"]["wins"] += 1
         else:
             state["performance"]["losses"] += 1
             state["daily_loss"] = state.get("daily_loss", 0) + abs(pnl)
@@ -424,88 +491,61 @@ def close_trade(symbol, price, reason):
 def update_trades():
     with state_lock:
         symbols = list(state["open_trades"].keys())
+        if state.get("daily_loss", 0) >= DAILY_LOSS_LIMIT:
+            for symbol in symbols:
+                try:
+                    df = safe_download(symbol, period='1d', interval='5m')
+                    if not df.empty:
+                        price = df['close'].iloc[-1]
+                        close_trade(symbol, price, "Daily loss limit reached")
+                except:
+                    pass
+            return
+    
     for symbol in symbols:
         try:
-            df = safe_yf_download(symbol, period='1d', interval='5m')
-            if df.empty: continue
-            price = df['Close'].iloc[-1]
+            df = safe_download(symbol, period='1d', interval='5m')
+            if df.empty:
+                continue
+            price = df['close'].iloc[-1]
             with state_lock:
                 trade = state["open_trades"].get(symbol)
-                if not trade: continue
-                if price >= trade["tp"]: close_trade(symbol, price, "TAKE PROFIT")
-                elif price <= trade["sl"]: close_trade(symbol, price, "STOP LOSS")
+                if not trade:
+                    continue
+                if price >= trade["tp"]:
+                    close_trade(symbol, price, "TAKE PROFIT")
+                elif price <= trade["sl"]:
+                    close_trade(symbol, price, "STOP LOSS")
         except:
             pass
 
-# ================= SCANNER ENGINE =================
-def background_scanner():
-    update_all_tickers()
-    while True:
-        try:
-            phase = get_market_phase()
-            if phase != "CLOSED":
-                with state_lock:
-                    tickers = list(state["tickers"])
-                
-                if not tickers:
-                    update_all_tickers()
-                    continue
-                
-                logger.info(f"Starting scan of {len(tickers)} symbols - Phase: {phase}")
-                
-                for i in range(0, len(tickers), CHUNK_SIZE):
-                    chunk = tickers[i:i+CHUNK_SIZE]
-                    
-                    filtered = []
-                    with ThreadPoolExecutor(max_workers=FAST_FILTER_WORKERS) as executor:
-                        future_to_sym = {executor.submit(fast_filter, sym): sym for sym in chunk}
-                        for future in as_completed(future_to_sym):
-                            if future.result():
-                                filtered.append(future_to_sym[future])
-                            time.sleep(DELAY_BETWEEN_REQUESTS / FAST_FILTER_WORKERS)
-                    
-                    logger.info(f"Chunk {i//CHUNK_SIZE + 1}: {len(filtered)}/{len(chunk)} passed fast filter")
-                    
-                    if filtered:
-                        with ThreadPoolExecutor(max_workers=DEEP_ANALYSIS_WORKERS) as executor:
-                            executor.map(process_symbol, filtered)
-                    
-                    time.sleep(BREAK_BETWEEN_CHUNKS)
-            time.sleep(SCAN_INTERVAL_SEC)
-        except Exception as e:
-            logger.error(f"Scanner error: {e}")
-            time.sleep(60)
-
-def background_monitor():
-    while True:
-        try:
-            if get_market_phase() != "CLOSED":
-                update_trades()
-            time.sleep(TRADE_MONITOR_INTERVAL)
-        except Exception as e:
-            logger.error(f"Monitor error: {e}")
-            time.sleep(30)
-
-# ================= TELEGRAM HANDLERS (FIXED) =================
-if bot:
-    # إزالة أي webhook قديم
+# ================= TELEGRAM HANDLERS =================
+def run_telegram_bot():
+    if not bot:
+        return
     try:
         bot.remove_webhook()
-        logger.info("Webhook removed")
     except:
         pass
     
+    while True:
+        try:
+            logger.info("🤖 Starting Telegram bot polling...")
+            bot.infinity_polling(timeout=30, long_polling_timeout=10)
+        except Exception as e:
+            logger.error(f"Polling error: {e}")
+            time.sleep(15)
+
+if bot:
     @bot.message_handler(commands=['start'])
     def cmd_start(message):
         phase = get_market_phase()
-        msg = f"👋 Welcome to AI Trading Bot v32!\n\n"
-        msg += f"I'm currently monitoring {len(state['tickers'])} stocks.\n"
-        msg += f"Current Market Phase: {PHASE_SETTINGS[phase]['description']}\n\n"
-        msg += f"Use /status to check performance.\n"
-        msg += f"Use /positions to see open trades.\n"
-        msg += f"Use /close <SYMBOL> to manually close a trade.\n"
-        msg += f"Use /scan <SYMBOL> to analyze a stock.\n\n"
-        msg += f"Good luck with your trades! 🚀"
+        msg = f"👋 Welcome to Trading Bot v32!\n\n"
+        msg += f"📊 Monitoring {len(state['tickers'])} stocks\n"
+        msg += f"🕐 Phase: {PHASE_SETTINGS[phase]['description']}\n\n"
+        msg += f"✅ No more Yahoo blocking!\n"
+        msg += f"📈 Risk/Reward: 1:2\n\n"
+        msg += f"Commands:\n/status - Performance\n/positions - Open trades\n/close SYMBOL - Close trade\n/scan SYMBOL - Analyze"
         send_telegram(msg)
 
     @bot.message_handler(commands=['status'])
@@ -514,18 +554,18 @@ if bot:
             perf = state["performance"]
             total = perf["wins"] + perf["losses"]
             wr = (perf["wins"] / total * 100) if total > 0 else 0
-            msg = f"📊 *Bot Status (v32)*\n✅ Wins: {perf['wins']}\n❌ Losses: {perf['losses']}\n📈 Win Rate: {wr:.1f}%\n💵 Total PnL: ${perf['total_pnl']:+.2f}\n📦 Open: {len(state['open_trades'])}\n🌐 Universe: {len(state['tickers'])} stocks"
+            msg = f"📊 *Bot Status*\n✅ Wins: {perf['wins']}\n❌ Losses: {perf['losses']}\n📈 Win Rate: {wr:.1f}%\n💵 Total PnL: ${perf['total_pnl']:+.2f}\n📦 Open: {len(state['open_trades'])}\n🌐 Universe: {len(state['tickers'])} stocks\n📉 Daily Loss: ${state.get('daily_loss', 0):.2f}"
         send_telegram(msg)
 
     @bot.message_handler(commands=['positions'])
     def cmd_positions(message):
         with state_lock:
             trades = state["open_trades"]
-            if not trades: 
+            if not trades:
                 send_telegram("📭 No open positions")
                 return
             msg = "*Open Positions*\n"
-            for sym, t in trades.items(): 
+            for sym, t in trades.items():
                 msg += f"\n🔹 *{sym}* | Entry ${t['entry']:.2f} | TP ${t['tp']:.2f} | SL ${t['sl']:.2f}"
             send_telegram(msg)
 
@@ -536,22 +576,20 @@ if bot:
             if len(args) != 2:
                 send_telegram("Usage: /close <SYMBOL>")
                 return
-            symbol_to_close = args[1].upper()
+            symbol = args[1].upper()
             with state_lock:
-                if symbol_to_close not in state["open_trades"]:
-                    send_telegram(f"❌ {symbol_to_close} is not an open position.")
+                if symbol not in state["open_trades"]:
+                    send_telegram(f"❌ {symbol} is not an open position")
                     return
-            
-            df = safe_yf_download(symbol_to_close, period='1d', interval='5m')
+            df = safe_download(symbol, period='1d', interval='5m')
             if df.empty:
-                send_telegram(f"❌ Could not fetch current price for {symbol_to_close}.")
+                send_telegram(f"❌ Could not fetch price for {symbol}")
                 return
-            current_price = df['Close'].iloc[-1]
-            close_trade(symbol_to_close, current_price, "Manual Close via Telegram")
-            send_telegram(f"✅ Position for {symbol_to_close} closed successfully.")
+            current_price = df['close'].iloc[-1]
+            close_trade(symbol, current_price, "Manual Close")
+            send_telegram(f"✅ Position {symbol} closed")
         except Exception as e:
-            logger.error(f"Error closing trade via Telegram: {e}")
-            send_telegram("An error occurred while trying to close the position.")
+            send_telegram(f"❌ Error: {e}")
 
     @bot.message_handler(commands=['scan'])
     def cmd_scan(message):
@@ -561,10 +599,9 @@ if bot:
                 send_telegram("Usage: /scan <SYMBOL>")
                 return
             symbol = args[1].upper()
-            
             send_telegram(f"🔍 Analyzing {symbol}...")
             
-            df = safe_yf_download(symbol, period="10d", interval="15m")
+            df = safe_download(symbol, period="10d", interval="15m")
             if df.empty:
                 send_telegram(f"❌ No data for {symbol}")
                 return
@@ -583,33 +620,26 @@ if bot:
             if 40 < last['rsi'] < 70: score += 10
             if last['ema9'] > last['ema21']: score += 10
             
-            msg = f"📊 *{symbol} Analysis*\n"
-            msg += f"💰 Price: ${last['close']:.2f}\n"
-            msg += f"📊 Volume: {int(last['volume']):,}\n"
-            msg += f"⚡ RSI: {last['rsi']:.1f}\n"
-            msg += f"🎯 Score: {score}/{settings['min_score']}\n"
-            msg += f"🕐 Phase: {phase}"
+            msg = f"📊 *{symbol} Analysis*\n💰 Price: ${last['close']:.2f}\n📊 Volume: {int(last['volume']):,}\n⚡ RSI: {last['rsi']:.1f}\n🎯 Score: {score}/{settings['min_score']}\n🕐 Phase: {phase}"
             send_telegram(msg)
         except Exception as e:
-            send_telegram(f"❌ Error analyzing {symbol}: {e}")
-
-    # تشغيل البوت بطريقة Polling صريحة
-    def run_bot():
-        logger.info("Starting Telegram bot polling...")
-        while True:
-            try:
-                bot.infinity_polling(timeout=10, long_polling_timeout=5)
-            except Exception as e:
-                logger.error(f"Polling error: {e}")
-                time.sleep(10)
-    
-    threading.Thread(target=run_bot, daemon=True).start()
+            send_telegram(f"❌ Error: {e}")
 
 # ================= MAIN =================
 if __name__ == "__main__":
     load_state()
+    
     threading.Thread(target=background_scanner, daemon=True).start()
     threading.Thread(target=background_monitor, daemon=True).start()
-    logger.info("Bot started successfully")
+    
+    if bot:
+        threading.Thread(target=run_telegram_bot, daemon=True).start()
+    
+    logger.info("=" * 50)
+    logger.info("✅ Bot started successfully!")
+    logger.info(f"📊 Universe size: {len(state.get('tickers', []))} stocks")
+    logger.info(f"⚡ No Yahoo blocking - Using curl_cffi + aiohttp")
+    logger.info("=" * 50)
+    
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)

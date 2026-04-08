@@ -3,7 +3,6 @@ import time
 import json
 import logging
 import threading
-import asyncio
 import io
 import urllib.request
 from datetime import datetime, timedelta
@@ -20,7 +19,6 @@ from flask import Flask
 import telebot
 from tenacity import retry, stop_after_attempt, wait_exponential
 from curl_cffi import requests
-import aiohttp
 import ftplib
 
 # ================= CONFIGURATION =================
@@ -37,12 +35,12 @@ DAILY_LOSS_LIMIT = 300.0
 STATE_FILE = os.path.join(STATE_DIR, "state_v32.json")
 
 # Scanner Settings
-SCAN_INTERVAL_SEC = 900
-CHUNK_SIZE = 100
-FAST_FILTER_WORKERS = 5
-DEEP_ANALYSIS_WORKERS = 3
-DELAY_BETWEEN_REQUESTS = 0.3
-BREAK_BETWEEN_CHUNKS = 5
+SCAN_INTERVAL_SEC = 1800  # 30 دقيقة
+CHUNK_SIZE = 50
+FAST_FILTER_WORKERS = 3
+DEEP_ANALYSIS_WORKERS = 2
+DELAY_BETWEEN_REQUESTS = 0.5
+BREAK_BETWEEN_CHUNKS = 10
 TRADE_MONITOR_INTERVAL = 60
 
 TELEGRAM_DELAY = 1.0
@@ -151,95 +149,58 @@ def send_telegram(message, photo=None):
             except Exception as e:
                 logger.error(f"Telegram error: {e}")
 
-# ================= DATA FETCHER (NO BLOCKING) =================
-class StockDataFetcher:
-    def __init__(self):
-        self.session = None
-    
-    async def get_session(self):
-        if self.session is None:
-            self.session = aiohttp.ClientSession(
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'application/json',
-                }
-            )
-        return self.session
-    
-    async def fetch_chart_data(self, symbol, period="5d", interval="15m"):
-        try:
-            days_map = {"5d": 5, "1d": 1, "10d": 10}
-            days = days_map.get(period, 5)
-            end_date = int(datetime.now().timestamp())
-            start_date = int((datetime.now() - timedelta(days=days)).timestamp())
-            interval_map = {"15m": "15m", "5m": "5m", "1d": "1d"}
-            yf_interval = interval_map.get(interval, "15m")
-            
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={yf_interval}&period1={start_date}&period2={end_date}"
-            session = await self.get_session()
-            
-            for attempt in range(3):
-                try:
-                    async with session.get(url, timeout=15) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            return self._parse_response(data)
-                        elif response.status == 429:
-                            await asyncio.sleep(5)
-                        else:
-                            await asyncio.sleep(1)
-                except:
-                    await asyncio.sleep(2)
-            return None
-        except:
-            return None
-    
-    def _parse_response(self, data):
-        try:
-            if 'chart' not in data or 'result' not in data['chart'] or not data['chart']['result']:
-                return None
-            result = data['chart']['result'][0]
-            timestamps = result.get('timestamp', [])
-            quote = result.get('indicators', {}).get('quote', [{}])[0]
-            if not timestamps or not quote:
-                return None
-            df = pd.DataFrame({
-                'timestamp': pd.to_datetime(timestamps, unit='s'),
-                'open': quote.get('open', []),
-                'high': quote.get('high', []),
-                'low': quote.get('low', []),
-                'close': quote.get('close', []),
-                'volume': quote.get('volume', [])
-            })
-            df = df.dropna()
-            if df.empty:
-                return None
-            df.set_index('timestamp', inplace=True)
-            return df
-        except:
-            return None
-    
-    async def close(self):
-        if self.session:
-            await self.session.close()
-
-_fetcher = None
-_fetcher_lock = threading.Lock()
-
-def get_fetcher():
-    global _fetcher
-    if _fetcher is None:
-        _fetcher = StockDataFetcher()
-    return _fetcher
-
+# ================= DATA FETCHER WITH CURL_CFFI =================
 def safe_download(symbol, period="5d", interval="15m"):
+    """جلب البيانات مباشرة باستخدام curl_cffi - بدون حظر"""
     try:
-        fetcher = get_fetcher()
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(fetcher.fetch_chart_data(symbol, period, interval))
-        loop.close()
-        return result if result is not None else pd.DataFrame()
+        days_map = {"5d": 5, "1d": 1, "10d": 10, "1mo": 30}
+        days = days_map.get(period, 5)
+        
+        end_date = int(datetime.now().timestamp())
+        start_date = int((datetime.now() - timedelta(days=days)).timestamp())
+        
+        interval_map = {"15m": "15m", "5m": "5m", "1d": "1d", "1h": "60m"}
+        yf_interval = interval_map.get(interval, "15m")
+        
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={yf_interval}&period1={start_date}&period2={end_date}"
+        
+        # تأخير عشوائي لتجنب الضغط
+        time.sleep(random.uniform(0.3, 0.7))
+        
+        # الطلب باستخدام curl_cffi (يقلد متصفح Chrome)
+        response = requests.get(url, impersonate="chrome120", timeout=15)
+        
+        if response.status_code != 200:
+            return pd.DataFrame()
+        
+        data = response.json()
+        
+        if 'chart' not in data or 'result' not in data['chart'] or not data['chart']['result']:
+            return pd.DataFrame()
+        
+        result = data['chart']['result'][0]
+        timestamps = result.get('timestamp', [])
+        quote = result.get('indicators', {}).get('quote', [{}])[0]
+        
+        if not timestamps or not quote:
+            return pd.DataFrame()
+        
+        df = pd.DataFrame({
+            'timestamp': pd.to_datetime(timestamps, unit='s'),
+            'open': quote.get('open', []),
+            'high': quote.get('high', []),
+            'low': quote.get('low', []),
+            'close': quote.get('close', []),
+            'volume': quote.get('volume', [])
+        })
+        
+        df = df.dropna()
+        if df.empty:
+            return pd.DataFrame()
+        
+        df.set_index('timestamp', inplace=True)
+        return df
+        
     except Exception as e:
         logger.error(f"Download error {symbol}: {e}")
         return pd.DataFrame()
@@ -258,19 +219,23 @@ def update_all_tickers():
         ftp = ftplib.FTP("ftp.nasdaqtrader.com")
         ftp.login()
         ftp.cwd("SymbolDirectory")
+        
         r_nasdaq = io.BytesIO()
         ftp.retrbinary("RETR nasdaqlisted.txt", r_nasdaq.write)
         r_nasdaq.seek(0)
         df_nasdaq = pd.read_csv(r_nasdaq, sep="|")
         tickers.extend(df_nasdaq["Symbol"].dropna().tolist())
+        
         r_other = io.BytesIO()
         ftp.retrbinary("RETR otherlisted.txt", r_other.write)
         r_other.seek(0)
         df_other = pd.read_csv(r_other, sep="|")
         tickers.extend(df_other["NASDAQ Symbol"].dropna().tolist())
         ftp.quit()
+        
         clean = [t for t in tickers if str(t).isalpha() and 1 <= len(str(t)) <= 5]
         clean = list(dict.fromkeys(clean))
+        
         if len(clean) > 100:
             with state_lock:
                 state["tickers"] = clean

@@ -32,7 +32,7 @@ RISK_PER_TRADE = 0.02
 MAX_OPEN_TRADES = 15
 SIGNAL_COOLDOWN = 3600
 DAILY_LOSS_LIMIT = 300.0
-STATE_FILE = os.path.join(STATE_DIR, "state_v31.json")
+STATE_FILE = os.path.join(STATE_DIR, "state_v32.json")
 
 # Balanced Speed & Safety Settings
 SCAN_INTERVAL_SEC = 600
@@ -87,7 +87,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("bot_v31.log"),
+        logging.FileHandler("bot_v32.log"),
         logging.StreamHandler()
     ]
 )
@@ -155,7 +155,6 @@ def reset_daily_loss_if_needed():
 
 # ================= FALLBACK UNIVERSE SOURCES =================
 def get_fallback_from_github():
-    """جلب قائمة الأسهم من GitHub (بدون تكرار)"""
     try:
         url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
         response = urllib.request.urlopen(url, timeout=15)
@@ -168,20 +167,16 @@ def get_fallback_from_github():
         logger.error(f"GitHub fallback error: {e}")
         return []
 
-# قائمة احتياطية صغيرة (آخر خط)
 MINIMAL_UNIVERSE = [
     "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX",
     "INTC", "PLTR", "SOFI", "NIO", "GME", "AMC", "RIOT", "MARA", "COIN", "HOOD",
-    "MSTR", "AFRM", "UPST", "SNDL", "TLRY", "ACB", "BYND", "PLUG", "FCEL", "SPCE",
-    "RIVN", "LCID", "QS", "CLSK", "HUT", "BITF", "BTBT", "CAN", "SDIG", "WULF"
+    "MSTR", "AFRM", "UPST", "SNDL", "TLRY", "ACB", "BYND", "PLUG", "FCEL", "SPCE"
 ]
 
 def update_all_tickers():
-    """تحديث قائمة الأسهم من مصادر متعددة (NASDAQ FTP -> GitHub -> Minimal)"""
     global state
     tickers = []
     
-    # ========== المصدر 1: NASDAQ FTP ==========
     try:
         logger.info("🔄 Source 1: Fetching from NASDAQ FTP...")
         ftp = ftplib.FTP("ftp.nasdaqtrader.com")
@@ -210,12 +205,11 @@ def update_all_tickers():
                 state["last_ticker_update"] = datetime.now().isoformat()
                 save_state()
             logger.info(f"✅ NASDAQ FTP: {len(clean)} symbols")
-            send_telegram(f"📊 Universe updated: {len(clean)} stocks (NASDAQ FTP)")
+            send_telegram(f"📊 Universe updated: {len(clean)} stocks")
             return clean
     except Exception as e:
         logger.error(f"NASDAQ FTP failed: {e}")
     
-    # ========== المصدر 2: GitHub Fallback ==========
     logger.info("🔄 Source 2: Fetching from GitHub fallback...")
     github_tickers = get_fallback_from_github()
     if github_tickers and len(github_tickers) > 100:
@@ -224,16 +218,14 @@ def update_all_tickers():
             state["last_ticker_update"] = datetime.now().isoformat()
             save_state()
         logger.info(f"✅ GitHub fallback: {len(github_tickers)} symbols")
-        send_telegram(f"📊 Universe updated: {len(github_tickers)} stocks (GitHub fallback)")
+        send_telegram(f"📊 Universe updated: {len(github_tickers)} stocks")
         return github_tickers
     
-    # ========== المصدر 3: Minimal Universe ==========
     logger.warning(f"🔄 Source 3: Using minimal universe ({len(MINIMAL_UNIVERSE)} symbols)")
     with state_lock:
         state["tickers"] = MINIMAL_UNIVERSE
         state["last_ticker_update"] = datetime.now().isoformat()
         save_state()
-    send_telegram(f"⚠️ Using minimal universe: {len(MINIMAL_UNIVERSE)} stocks")
     return MINIMAL_UNIVERSE
 
 # ================= TELEGRAM HELPERS =================
@@ -341,11 +333,9 @@ def generate_chart(symbol, df, entry, tp, sl, is_accumulating=False, is_pre_brea
 
 # ================= YFINANCE WRAPPER WITH RETRY =================
 user_agents = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/109.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/109.0.0.0'
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
 ]
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
@@ -363,7 +353,8 @@ def fast_filter(symbol):
         price = df["Close"].iloc[-1]
         volume = df["Volume"].iloc[-1]
         return MIN_PRICE < price < MAX_PRICE and volume > MIN_VOLUME
-    except: return False
+    except: 
+        return False
 
 # ================= PROCESS SYMBOL =================
 def process_symbol(symbol):
@@ -399,7 +390,7 @@ def process_symbol(symbol):
                 with state_lock:
                     state["seen_signals"][symbol] = now
                     save_state()
-    except Exception as e:
+    except Exception:
         pass
 
 # ================= TRADE MANAGEMENT =================
@@ -448,9 +439,7 @@ def update_trades():
 
 # ================= SCANNER ENGINE =================
 def background_scanner():
-    # تحديث القائمة أول مرة
     update_all_tickers()
-    
     while True:
         try:
             phase = get_market_phase()
@@ -459,7 +448,6 @@ def background_scanner():
                     tickers = list(state["tickers"])
                 
                 if not tickers:
-                    logger.error("No tickers available, updating...")
                     update_all_tickers()
                     continue
                 
@@ -496,26 +484,132 @@ def background_monitor():
             time.sleep(TRADE_MONITOR_INTERVAL)
         except Exception as e:
             logger.error(f"Monitor error: {e}")
-            send_telegram("An error occurred while trying to close the position.")
+            time.sleep(30)
 
+# ================= TELEGRAM HANDLERS (FIXED) =================
+if bot:
+    # إزالة أي webhook قديم
+    try:
+        bot.remove_webhook()
+        logger.info("Webhook removed")
+    except:
+        pass
+    
     @bot.message_handler(commands=['start'])
     def cmd_start(message):
         phase = get_market_phase()
-        msg = f"👋 Welcome to AI Trading Bot v31!\n\n"
+        msg = f"👋 Welcome to AI Trading Bot v32!\n\n"
         msg += f"I'm currently monitoring {len(state['tickers'])} stocks.\n"
         msg += f"Current Market Phase: {PHASE_SETTINGS[phase]['description']}\n\n"
         msg += f"Use /status to check performance.\n"
         msg += f"Use /positions to see open trades.\n"
-        msg += f"Use /close <SYMBOL> to manually close a trade.\n\n"
+        msg += f"Use /close <SYMBOL> to manually close a trade.\n"
+        msg += f"Use /scan <SYMBOL> to analyze a stock.\n\n"
         msg += f"Good luck with your trades! 🚀"
         send_telegram(msg)
 
+    @bot.message_handler(commands=['status'])
+    def cmd_status(message):
+        with state_lock:
+            perf = state["performance"]
+            total = perf["wins"] + perf["losses"]
+            wr = (perf["wins"] / total * 100) if total > 0 else 0
+            msg = f"📊 *Bot Status (v32)*\n✅ Wins: {perf['wins']}\n❌ Losses: {perf['losses']}\n📈 Win Rate: {wr:.1f}%\n💵 Total PnL: ${perf['total_pnl']:+.2f}\n📦 Open: {len(state['open_trades'])}\n🌐 Universe: {len(state['tickers'])} stocks"
+        send_telegram(msg)
+
+    @bot.message_handler(commands=['positions'])
+    def cmd_positions(message):
+        with state_lock:
+            trades = state["open_trades"]
+            if not trades: 
+                send_telegram("📭 No open positions")
+                return
+            msg = "*Open Positions*\n"
+            for sym, t in trades.items(): 
+                msg += f"\n🔹 *{sym}* | Entry ${t['entry']:.2f} | TP ${t['tp']:.2f} | SL ${t['sl']:.2f}"
+            send_telegram(msg)
+
+    @bot.message_handler(commands=['close'])
+    def cmd_close(message):
+        try:
+            args = message.text.split()
+            if len(args) != 2:
+                send_telegram("Usage: /close <SYMBOL>")
+                return
+            symbol_to_close = args[1].upper()
+            with state_lock:
+                if symbol_to_close not in state["open_trades"]:
+                    send_telegram(f"❌ {symbol_to_close} is not an open position.")
+                    return
+            
+            df = safe_yf_download(symbol_to_close, period='1d', interval='5m')
+            if df.empty:
+                send_telegram(f"❌ Could not fetch current price for {symbol_to_close}.")
+                return
+            current_price = df['Close'].iloc[-1]
+            close_trade(symbol_to_close, current_price, "Manual Close via Telegram")
+            send_telegram(f"✅ Position for {symbol_to_close} closed successfully.")
+        except Exception as e:
+            logger.error(f"Error closing trade via Telegram: {e}")
+            send_telegram("An error occurred while trying to close the position.")
+
+    @bot.message_handler(commands=['scan'])
+    def cmd_scan(message):
+        try:
+            args = message.text.split()
+            if len(args) != 2:
+                send_telegram("Usage: /scan <SYMBOL>")
+                return
+            symbol = args[1].upper()
+            
+            send_telegram(f"🔍 Analyzing {symbol}...")
+            
+            df = safe_yf_download(symbol, period="10d", interval="15m")
+            if df.empty:
+                send_telegram(f"❌ No data for {symbol}")
+                return
+            
+            df.columns = [c.lower() for c in df.columns]
+            df = compute_indicators(df)
+            last = df.iloc[-1]
+            phase = get_market_phase()
+            settings = PHASE_SETTINGS.get(phase, PHASE_SETTINGS["REGULAR"])
+            
+            vol_surge = last['volume'] > df['vol_ma'].iloc[-1] * 2.0
+            price_break = last['close'] > df['high'].iloc[-20:-1].max()
+            score = 0
+            if vol_surge: score += 40
+            if price_break: score += 40
+            if 40 < last['rsi'] < 70: score += 10
+            if last['ema9'] > last['ema21']: score += 10
+            
+            msg = f"📊 *{symbol} Analysis*\n"
+            msg += f"💰 Price: ${last['close']:.2f}\n"
+            msg += f"📊 Volume: {int(last['volume']):,}\n"
+            msg += f"⚡ RSI: {last['rsi']:.1f}\n"
+            msg += f"🎯 Score: {score}/{settings['min_score']}\n"
+            msg += f"🕐 Phase: {phase}"
+            send_telegram(msg)
+        except Exception as e:
+            send_telegram(f"❌ Error analyzing {symbol}: {e}")
+
+    # تشغيل البوت بطريقة Polling صريحة
+    def run_bot():
+        logger.info("Starting Telegram bot polling...")
+        while True:
+            try:
+                bot.infinity_polling(timeout=10, long_polling_timeout=5)
+            except Exception as e:
+                logger.error(f"Polling error: {e}")
+                time.sleep(10)
+    
+    threading.Thread(target=run_bot, daemon=True).start()
+
+# ================= MAIN =================
 if __name__ == "__main__":
     load_state()
     threading.Thread(target=background_scanner, daemon=True).start()
     threading.Thread(target=background_monitor, daemon=True).start()
-    if bot:
-        threading.Thread(target=lambda: bot.infinity_polling(), daemon=True).start()
-        logger.info("Telegram bot started")
-        send_telegram("✅ *Bot v31 Started*\nMulti-source universe + Charts + Risk Management")
-    app.run(host="0.0.0.0", port=5000)
+    logger.info("Bot started successfully")
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

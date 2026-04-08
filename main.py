@@ -184,9 +184,9 @@ def send_telegram(message, photo=None):
     if bot and CHAT_ID:
         try:
             if photo:
-                bot.send_photo(CHAT_ID, photo, caption=message, parse_mode=\'Markdown\')
+                bot.send_photo(CHAT_ID, photo, caption=message, parse_mode='Markdown')
             else:
-                bot.send_message(CHAT_ID, message, parse_mode=\'Markdown\')
+                bot.send_message(CHAT_ID, message, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Telegram error: {e}")
 

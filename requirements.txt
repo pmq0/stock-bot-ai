@@ -6,5 +6,3 @@ pytz==2023.3
 matplotlib==3.7.1
 tenacity==8.2.3
 curl_cffi==0.7.1
-aiohttp==3.9.0
-yfinance==0.2.33

@@ -216,6 +216,15 @@ def reset_daily_loss_if_needed():
             state["last_reset"] = today
             save_state()
 
+def reset_halt_counter_if_needed():
+    """تصفير عداد الإيقافات كل يوم"""
+    today = now_est().date().isoformat()
+    with state_lock:
+        if state.get("last_halt_reset") != today:
+            state["halt_counter"] = {}
+            state["last_halt_reset"] = today
+            save_state()
+            
 # ================= TELEGRAM HELPERS =================
 _last_telegram_time = 0
 _telegram_lock = threading.Lock()
@@ -224,7 +233,71 @@ def send_telegram(message, photo=None):
     global _last_telegram_time
     if bot and CHAT_ID:
         with _telegram_lock:
-            now = time.time()
+        state = {
+    "open_trades": {},
+    "performance": {"wins": 0, "losses": 0, "total_pnl": 0.0},
+    "seen_signals": {},
+    "daily_loss": 0.0,
+    "last_reset": None,
+    "tickers": [],
+    "last_ticker_update": None,
+    "halted_stocks": {},
+    "halt_counter": {}
+}
+
+EASTERN_TZ = pytz.timezone("US/Eastern")
+
+def now_est():
+    return datetime.now(EASTERN_TZ)
+
+def get_market_phase():
+    now = now_est()
+    hour = now.hour
+    weekday = now.weekday()
+    if weekday >= 5: return "CLOSED"
+    if 4 <= hour < 9: return "PRE"
+    elif 9 <= hour < 16: return "REGULAR"
+    elif 16 <= hour < 20: return "AFTER"
+    else: return "CLOSED"
+
+def save_state():
+    with state_lock:
+        try:
+            os.makedirs(os.path.dirname(STATE_FILE) or ".", exist_ok=True)
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2, default=str)
+        except Exception as e:
+            logger.error(f"Save state error: {e}")
+
+def load_state():
+    global state
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            with state_lock:
+                state.update(loaded)
+            logger.info("State loaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to load state: {e}")
+
+def reset_daily_loss_if_needed():
+    today = now_est().date().isoformat()
+    with state_lock:
+        if state.get("last_reset") != today:
+            state["daily_loss"] = 0.0
+            state["last_reset"] = today
+            save_state()
+
+def reset_halt_counter_if_needed():
+    """تصفير عداد الإيقافات كل يوم"""
+    today = now_est().date().isoformat()
+    with state_lock:
+        if state.get("last_halt_reset") != today:
+            state["halt_counter"] = {}
+            state["last_halt_reset"] = today
+            save_state()
+    now = time.time()
             elapsed = now - _last_telegram_time
             if elapsed < TELEGRAM_DELAY:
                 time.sleep(TELEGRAM_DELAY - elapsed)

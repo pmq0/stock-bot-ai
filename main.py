@@ -55,6 +55,57 @@ MIN_PRICE = 0.7     # أقل سعر
 MAX_PRICE = 500    # أعلى سعر
 MIN_VOLUME = 50000 # أقل حجم تداول (يستخدم كحد أدنى عام)
 
+def fast_momentum_scanner():
+    """دالة سريعة لصيد الأسهم التي تحقق قفزات كبيرة في فترة قصيرة"""
+    phase = get_market_phase()
+    # يعمل فقط في أول ساعة من التداول العادي (أفضل وقت للقفزات)
+    if phase != "REGULAR" or now_est().hour >= 11:
+        return
+        
+    with state_lock:
+        tickers = list(state["tickers"])
+        
+    for symbol in tickers[:200]: # افحص أول 200 سهم فقط للسرعة
+        try:
+            # جلب بيانات اليوم الحالي (شموع 5 دقائق)
+            df = safe_download(symbol, period="1d", interval="5m")
+            if df.empty or len(df) < 5:
+                continue
+                
+            price_now = df['close'].iloc[-1]
+            price_open = df['open'].iloc[0]
+            volume_avg = df['volume'].rolling(20).mean().iloc[-1]
+            
+            # 1. فلتر السعر والحجم
+            if not (MOMENTUM_PRICE_MIN < price_now < MOMENTUM_PRICE_MAX):
+                continue
+            if df['volume'].iloc[-1] < MOMENTUM_VOL_MIN:
+                continue
+                
+            # 2. الشرط الأهم: هل ارتفع السهم بنسبة كبيرة عن سعر افتتاحه؟
+            gain_pct = (price_now - price_open) / price_open * 100
+            if gain_pct < MOMENTUM_GAIN_PCT:
+                continue
+                
+            # 3. وصلنا إلى هنا، معناته السهم في قفزة قوية! نحتاج نتأكد من عدم تكرار الإشارة.
+            now = time.time()
+            last_momentum = state["seen_signals"].get(f"mom_{symbol}", 0)
+            if now - last_momentum > 3600: # إشارة وحدة كل ساعة لكل سهم
+                # نحسب حجم عقد مناسب للمخاطرة
+                size = calculate_position_size(price_now)
+                # نرسل الإشارة
+                msg = f"⚡ *MOMENTUM ALERT: {symbol}* ⚡\n💰 Price: ${price_now:.2f}\n📈 Gain: +{gain_pct:.1f}% from open!\n📊 Volume: {df['volume'].iloc[-1]:,}\n🎯 Consider an entry with a tight stop-loss!"
+                send_telegram(msg)
+                
+                with state_lock:
+                    state["seen_signals"][f"mom_{symbol}"] = now
+                    save_state()
+                break # نكتفي بإشارة واحدة في كل دورة
+                
+        except Exception as e:
+            logger.error(f"Momentum scan error {symbol}: {e}")
+        time.sleep(0.5) # نرتاح بين كل رمز
+
 # Fast Momentum Scanner Settings (لصيد الأسهم السريعة)
 MOMENTUM_SCAN_INTERVAL = 120   # كل دقيقتين
 MOMENTUM_PRICE_MIN = 2.0       # سعر لا يقل عن 2 دولار (لتجنب pennies الخطيرة)

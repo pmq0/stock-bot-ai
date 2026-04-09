@@ -291,6 +291,138 @@ def safe_download(symbol, period="5d", interval="15m"):
         logger.error(f"Download error {symbol}: {e}")
         return pd.DataFrame()
 
+def monitor_trading_halts():
+    """مراقبة إيقافات التداول وإرسال تنبيه"""
+    try:
+        url = "https://www.nasdaqtrader.com/dynamic/TradeHalts.csv"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+        }
+        
+        response = requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
+        
+        if response.status_code != 200:
+            logger.warning(f"Failed to fetch halts data, status code: {response.status_code}")
+            return
+        
+        import csv
+        from io import StringIO
+        
+        content = response.text
+        lines = content.split('\n')
+        
+        new_halts = []
+        current_date = datetime.now(EASTERN_TZ).strftime('%m/%d/%Y')
+        
+        for line in lines:
+            if not line.strip() or line.startswith('Halt') or line.startswith('---'):
+                continue
+            
+            parts = line.split(',')
+            if len(parts) < 5:
+                continue
+            
+            halt_date = parts[0].strip('"')
+            if halt_date != current_date:
+                continue
+            
+            halt_time = parts[1].strip('"')
+            symbol = parts[2].strip('"')
+            name = parts[3].strip('"')
+            market = parts[4].strip('"')
+            reason = parts[5].strip('"') if len(parts) > 5 else ''
+            
+            with state_lock:
+                if symbol not in state.get("halted_stocks", {}):
+                    new_halts.append({
+                        'symbol': symbol,
+                        'name': name,
+                        'time': halt_time,
+                        'market': market,
+                        'reason': reason
+                    })
+                    if "halted_stocks" not in state:
+                        state["halted_stocks"] = {}
+                    state["halted_stocks"][symbol] = {
+                        'time': halt_time,
+                        'date': halt_date
+                    }
+        
+        save_state()
+        
+        for halt in new_halts:
+            price_info = get_stop_price(halt['symbol'])
+            
+            if price_info:
+                current_price = price_info['price']
+                change_pct = price_info['change_pct']
+                direction = "🟢 صعود ⬆️" if change_pct > 0 else "🔴 نزول ⬇️" if change_pct < 0 else "⚪ ثابت"
+            else:
+                current_price = "غير متوفر"
+                change_pct = 0
+                direction = "⚪ غير معروف"
+            
+            reason_text = ""
+            emoji = "⚠️"
+            if reason == 'M':
+                reason_text = "تقلبات السوق (Volatility)"
+                emoji = "🔴"
+            elif reason == 'D':
+                reason_text = "في انتظار خبر (News Pending)"
+                emoji = "🟡"
+            elif reason == 'H':
+                reason_text = "إيقاف مؤقت (Trading Halt)"
+                emoji = "🟠"
+            else:
+                reason_text = f"كود {reason}"
+            
+            msg = f"{emoji} *تنبيه: إيقاف تداول*\n"
+            msg += f"📊 *{halt['symbol']}* - {halt['name']}\n"
+            msg += f"⏰ الوقت: {halt['time']} EST\n"
+            msg += f"🏛️ السوق: {halt['market']}\n"
+            msg += f"📋 السبب: {reason_text}\n"
+            msg += f"💰 السعر وقت الإيقاف: "
+            if isinstance(current_price, float):
+                msg += f"${current_price:.2f}\n"
+                msg += f"📈 التغير: {change_pct:+.2f}%\n"
+                msg += f"🔻 الاتجاه: {direction}\n"
+            else:
+                msg += f"{current_price}\n"
+            msg += f"⚠️ لا تتداول هذا السهم حتى يرفع الإيقاف"
+            
+            send_telegram(msg)
+            
+    except Exception as e:
+        logger.error(f"Halts monitor error: {e}")
+
+def get_stop_price(symbol):
+    """جلب سعر السهم وقت الإيقاف"""
+    try:
+        df = safe_download(symbol, period="1d", interval="5m")
+        if df.empty:
+            return None
+        
+        current_price = df['close'].iloc[-1]
+        prev_close = df['close'].iloc[0] if len(df) > 0 else current_price
+        change_pct = ((current_price - prev_close) / prev_close) * 100
+        
+        return {
+            'price': current_price,
+            'change_pct': change_pct
+        }
+    except:
+        return None
+
 # ================= FALLBACK UNIVERSE =================
 MINIMAL_UNIVERSE = [
     "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX",

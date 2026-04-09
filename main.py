@@ -773,6 +773,7 @@ def background_scanner():
 def background_monitor():
     while True:
         try:
+            reset_halt_counter_if_needed()
             if get_market_phase() != "CLOSED":
                 update_trades()
                 monitor_trading_halts() 

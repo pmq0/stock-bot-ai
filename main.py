@@ -700,6 +700,7 @@ def background_monitor():
         try:
             if get_market_phase() != "CLOSED":
                 update_trades()
+                monitor_trading_halts() 
             time.sleep(TRADE_MONITOR_INTERVAL)
         except Exception as e:
             logger.error(f"Monitor error: {e}")

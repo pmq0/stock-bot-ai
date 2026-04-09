@@ -55,6 +55,13 @@ MIN_PRICE = 0.7     # أقل سعر
 MAX_PRICE = 500    # أعلى سعر
 MIN_VOLUME = 50000 # أقل حجم تداول (يستخدم كحد أدنى عام)
 
+# Fast Momentum Scanner Settings (لصيد الأسهم السريعة)
+MOMENTUM_SCAN_INTERVAL = 120   # كل دقيقتين
+MOMENTUM_PRICE_MIN = 2.0       # سعر لا يقل عن 2 دولار (لتجنب pennies الخطيرة)
+MOMENTUM_PRICE_MAX = 100.0     # سعر لا يزيد عن 100 دولار
+MOMENTUM_VOL_MIN = 500000      # حجم لا يقل عن نصف مليون سهم
+MOMENTUM_GAIN_PCT = 10.0       # ارتفاع 10% أو أكثر في أول 30 دقيقة
+
 def fast_filter(symbol):
     try:
         df = safe_download(symbol, period="1d")

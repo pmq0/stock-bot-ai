@@ -528,6 +528,7 @@ def background_scanner():
     update_all_tickers()
     while True:
         try:
+            fast_momentum_scanner()
             phase = get_market_phase()
             if phase != "CLOSED":
                 with state_lock:

@@ -168,7 +168,8 @@ state = {
     "last_reset": None,
     "tickers": [],
     "last_ticker_update": None,
-    "halted_stocks": {}
+    "halted_stocks": {},
+    "halt_counter": {}
 }
 
 EASTERN_TZ = pytz.timezone("US/Eastern")

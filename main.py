@@ -35,13 +35,13 @@ SIGNAL_COOLDOWN = 3600
 DAILY_LOSS_LIMIT = 300.0
 STATE_FILE = os.path.join(STATE_DIR, "state_v32.json")
 
-# Scanner Settings - الإعدادات الأسرع (آمنة)
-SCAN_INTERVAL_SEC = 900    # 15 دقيقة بدلاً من 30
-CHUNK_SIZE = 100           # 100 بدلاً من 50
-FAST_FILTER_WORKERS = 5    # 5 بدلاً من 3
+# Scanner Settings
+SCAN_INTERVAL_SEC = 900
+CHUNK_SIZE = 100
+FAST_FILTER_WORKERS = 5
 DEEP_ANALYSIS_WORKERS = 3
-DELAY_BETWEEN_REQUESTS = 0.15  # نصف الطريق بين 0.1 و 0.2
-BREAK_BETWEEN_CHUNKS = 5      # 5 بدلاً من 10
+DELAY_BETWEEN_REQUESTS = 0.15
+BREAK_BETWEEN_CHUNKS = 5
 TRADE_MONITOR_INTERVAL = 60
 
 TELEGRAM_DELAY = 1.0
@@ -51,23 +51,28 @@ TP_PCT = 1.06
 SL_PCT = 0.97
 
 # Fast Filter Thresholds
-MIN_PRICE = 0.7     # أقل سعر
-MAX_PRICE = 500    # أعلى سعر
-MIN_VOLUME = 50000 # أقل حجم تداول (يستخدم كحد أدنى عام)
+MIN_PRICE = 0.7
+MAX_PRICE = 500
+MIN_VOLUME = 50000
+
+# Fast Momentum Scanner Settings
+MOMENTUM_SCAN_INTERVAL = 120
+MOMENTUM_PRICE_MIN = 2.0
+MOMENTUM_PRICE_MAX = 100.0
+MOMENTUM_VOL_MIN = 500000
+MOMENTUM_GAIN_PCT = 10.0
 
 def fast_momentum_scanner():
     """دالة سريعة لصيد الأسهم التي تحقق قفزات كبيرة في فترة قصيرة"""
     phase = get_market_phase()
-    # يعمل فقط في أول ساعة من التداول العادي (أفضل وقت للقفزات)
     if phase != "REGULAR" or now_est().hour >= 11:
         return
         
     with state_lock:
         tickers = list(state["tickers"])
         
-    for symbol in tickers[:200]: # افحص أول 200 سهم فقط للسرعة
+    for symbol in tickers[:200]:
         try:
-            # جلب بيانات اليوم الحالي (شموع 5 دقائق)
             df = safe_download(symbol, period="1d", interval="5m")
             if df.empty or len(df) < 5:
                 continue
@@ -76,42 +81,29 @@ def fast_momentum_scanner():
             price_open = df['open'].iloc[0]
             volume_avg = df['volume'].rolling(20).mean().iloc[-1]
             
-            # 1. فلتر السعر والحجم
             if not (MOMENTUM_PRICE_MIN < price_now < MOMENTUM_PRICE_MAX):
                 continue
             if df['volume'].iloc[-1] < MOMENTUM_VOL_MIN:
                 continue
                 
-            # 2. الشرط الأهم: هل ارتفع السهم بنسبة كبيرة عن سعر افتتاحه؟
             gain_pct = (price_now - price_open) / price_open * 100
             if gain_pct < MOMENTUM_GAIN_PCT:
                 continue
                 
-            # 3. وصلنا إلى هنا، معناته السهم في قفزة قوية! نحتاج نتأكد من عدم تكرار الإشارة.
             now = time.time()
             last_momentum = state["seen_signals"].get(f"mom_{symbol}", 0)
-            if now - last_momentum > 3600: # إشارة وحدة كل ساعة لكل سهم
-                # نحسب حجم عقد مناسب للمخاطرة
-                size = calculate_position_size(price_now)
-                # نرسل الإشارة
+            if now - last_momentum > 3600:
                 msg = f"⚡ *MOMENTUM ALERT: {symbol}* ⚡\n💰 Price: ${price_now:.2f}\n📈 Gain: +{gain_pct:.1f}% from open!\n📊 Volume: {df['volume'].iloc[-1]:,}\n🎯 Consider an entry with a tight stop-loss!"
                 send_telegram(msg)
                 
                 with state_lock:
                     state["seen_signals"][f"mom_{symbol}"] = now
                     save_state()
-                break # نكتفي بإشارة واحدة في كل دورة
+                break
                 
         except Exception as e:
             logger.error(f"Momentum scan error {symbol}: {e}")
-        time.sleep(0.5) # نرتاح بين كل رمز
-
-# Fast Momentum Scanner Settings (لصيد الأسهم السريعة)
-MOMENTUM_SCAN_INTERVAL = 120   # كل دقيقتين
-MOMENTUM_PRICE_MIN = 2.0       # سعر لا يقل عن 2 دولار (لتجنب pennies الخطيرة)
-MOMENTUM_PRICE_MAX = 100.0     # سعر لا يزيد عن 100 دولار
-MOMENTUM_VOL_MIN = 500000      # حجم لا يقل عن نصف مليون سهم
-MOMENTUM_GAIN_PCT = 10.0       # ارتفاع 10% أو أكثر في أول 30 دقيقة
+        time.sleep(0.5)
 
 def fast_filter(symbol):
     try:
@@ -121,25 +113,24 @@ def fast_filter(symbol):
         price = df["close"].iloc[-1]
         volume = df["volume"].iloc[-1]
         
-        # فلتر السعر أولاً
         if price < MIN_PRICE or price > MAX_PRICE:
             return False
         
-        # فلتر الحجم حسب السعر
         if price < 5:
-            if volume < 50000:  # Penny stocks
+            if volume < 50000:
                 return False
         elif price < 28:
-            if volume < 100000:  # Mid stocks
+            if volume < 100000:
                 return False
         else:
-            if volume < 300000:  # Higher stocks
+            if volume < 300000:
                 return False
         
         return True
         
     except:
         return False
+
 # ================= MARKET PHASE SETTINGS =================
 PHASE_SETTINGS = {
     "PRE": {"min_score": 80, "size_multiplier": 0.5, "vol_surge_mult": 2.5, "description": "🟡 Pre-Market"},
@@ -224,7 +215,7 @@ def reset_halt_counter_if_needed():
             state["halt_counter"] = {}
             state["last_halt_reset"] = today
             save_state()
-            
+
 # ================= TELEGRAM HELPERS =================
 _last_telegram_time = 0
 _telegram_lock = threading.Lock()
@@ -233,71 +224,7 @@ def send_telegram(message, photo=None):
     global _last_telegram_time
     if bot and CHAT_ID:
         with _telegram_lock:
-        state = {
-    "open_trades": {},
-    "performance": {"wins": 0, "losses": 0, "total_pnl": 0.0},
-    "seen_signals": {},
-    "daily_loss": 0.0,
-    "last_reset": None,
-    "tickers": [],
-    "last_ticker_update": None,
-    "halted_stocks": {},
-    "halt_counter": {}
-}
-
-EASTERN_TZ = pytz.timezone("US/Eastern")
-
-def now_est():
-    return datetime.now(EASTERN_TZ)
-
-def get_market_phase():
-    now = now_est()
-    hour = now.hour
-    weekday = now.weekday()
-    if weekday >= 5: return "CLOSED"
-    if 4 <= hour < 9: return "PRE"
-    elif 9 <= hour < 16: return "REGULAR"
-    elif 16 <= hour < 20: return "AFTER"
-    else: return "CLOSED"
-
-def save_state():
-    with state_lock:
-        try:
-            os.makedirs(os.path.dirname(STATE_FILE) or ".", exist_ok=True)
-            with open(STATE_FILE, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2, default=str)
-        except Exception as e:
-            logger.error(f"Save state error: {e}")
-
-def load_state():
-    global state
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-            with state_lock:
-                state.update(loaded)
-            logger.info("State loaded successfully")
-        except Exception as e:
-            logger.error(f"Failed to load state: {e}")
-
-def reset_daily_loss_if_needed():
-    today = now_est().date().isoformat()
-    with state_lock:
-        if state.get("last_reset") != today:
-            state["daily_loss"] = 0.0
-            state["last_reset"] = today
-            save_state()
-
-def reset_halt_counter_if_needed():
-    """تصفير عداد الإيقافات كل يوم"""
-    today = now_est().date().isoformat()
-    with state_lock:
-        if state.get("last_halt_reset") != today:
-            state["halt_counter"] = {}
-            state["last_halt_reset"] = today
-            save_state()
-    now = time.time()
+            now = time.time()
             elapsed = now - _last_telegram_time
             if elapsed < TELEGRAM_DELAY:
                 time.sleep(TELEGRAM_DELAY - elapsed)
@@ -310,9 +237,9 @@ def reset_halt_counter_if_needed():
             except Exception as e:
                 logger.error(f"Telegram error: {e}")
 
-# ================= DATA FETCHER WITH CURL_CFFI =================
+# ================= DATA FETCHER =================
 def safe_download(symbol, period="5d", interval="15m"):
-    """جلب البيانات مباشرة باستخدام curl_cffi - بدون حظر"""
+    """جلب البيانات مباشرة باستخدام curl_cffi"""
     try:
         days_map = {"5d": 5, "1d": 1, "10d": 10, "1mo": 30}
         days = days_map.get(period, 5)
@@ -325,10 +252,8 @@ def safe_download(symbol, period="5d", interval="15m"):
         
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={yf_interval}&period1={start_date}&period2={end_date}"
         
-        # تأخير عشوائي لتجنب الضغط
         time.sleep(random.uniform(0.3, 0.7))
         
-        # الطلب باستخدام curl_cffi (يقلد متصفح Chrome)
         response = requests.get(url, impersonate="chrome120", timeout=15)
         
         if response.status_code != 200:
@@ -366,21 +291,35 @@ def safe_download(symbol, period="5d", interval="15m"):
         logger.error(f"Download error {symbol}: {e}")
         return pd.DataFrame()
 
+def get_stop_price(symbol):
+    """جلب سعر السهم وقت الإيقاف"""
+    try:
+        df = safe_download(symbol, period="1d", interval="5m")
+        if df.empty:
+            return None
+        
+        current_price = df['close'].iloc[-1]
+        prev_close = df['close'].iloc[0] if len(df) > 0 else current_price
+        change_pct = ((current_price - prev_close) / prev_close) * 100
+        
+        return {
+            'price': current_price,
+            'change_pct': change_pct
+        }
+    except:
+        return None
+
 def monitor_trading_halts():
     """مراقبة إيقافات التداول وإرسال تنبيه"""
     try:
         url = "https://www.nasdaqtrader.com/dynamic/TradeHalts.csv"
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
             'Accept-Language': 'en-US,en;q=0.5',
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
             'Cache-Control': 'max-age=0',
         }
         
@@ -389,9 +328,6 @@ def monitor_trading_halts():
         if response.status_code != 200:
             logger.warning(f"Failed to fetch halts data, status code: {response.status_code}")
             return
-        
-        import csv
-        from io import StringIO
         
         content = response.text
         lines = content.split('\n')
@@ -447,19 +383,32 @@ def monitor_trading_halts():
                 change_pct = 0
                 direction = "⚪ غير معروف"
             
+            # ========== حساب عدد الإيقافات ==========
+            with state_lock:
+                if "halt_counter" not in state:
+                    state["halt_counter"] = {}
+                
+                if halt['symbol'] in state["halt_counter"]:
+                    state["halt_counter"][halt['symbol']] += 1
+                else:
+                    state["halt_counter"][halt['symbol']] = 1
+                
+                halt_count = state["halt_counter"][halt['symbol']]
+            # =======================================
+            
             reason_text = ""
             emoji = "⚠️"
-            if reason == 'M':
+            if halt['reason'] == 'M':
                 reason_text = "تقلبات السوق (Volatility)"
                 emoji = "🔴"
-            elif reason == 'D':
+            elif halt['reason'] == 'D':
                 reason_text = "في انتظار خبر (News Pending)"
                 emoji = "🟡"
-            elif reason == 'H':
+            elif halt['reason'] == 'H':
                 reason_text = "إيقاف مؤقت (Trading Halt)"
                 emoji = "🟠"
             else:
-                reason_text = f"كود {reason}"
+                reason_text = f"كود {halt['reason']}"
             
             msg = f"{emoji} *تنبيه: إيقاف تداول*\n"
             msg += f"📊 *{halt['symbol']}* - {halt['name']}\n"
@@ -473,30 +422,13 @@ def monitor_trading_halts():
                 msg += f"🔻 الاتجاه: {direction}\n"
             else:
                 msg += f"{current_price}\n"
+            msg += f"📊 عدد إيقافات اليوم: {halt_count} مرة\n"
             msg += f"⚠️ لا تتداول هذا السهم حتى يرفع الإيقاف"
             
             send_telegram(msg)
             
     except Exception as e:
         logger.error(f"Halts monitor error: {e}")
-
-def get_stop_price(symbol):
-    """جلب سعر السهم وقت الإيقاف"""
-    try:
-        df = safe_download(symbol, period="1d", interval="5m")
-        if df.empty:
-            return None
-        
-        current_price = df['close'].iloc[-1]
-        prev_close = df['close'].iloc[0] if len(df) > 0 else current_price
-        change_pct = ((current_price - prev_close) / prev_close) * 100
-        
-        return {
-            'price': current_price,
-            'change_pct': change_pct
-        }
-    except:
-        return None
 
 # ================= FALLBACK UNIVERSE =================
 MINIMAL_UNIVERSE = [
@@ -626,18 +558,6 @@ def generate_chart(symbol, df, entry, tp, sl, is_accumulating=False, is_pre_brea
     except Exception as e:
         logger.error(f"Chart error: {e}")
         return None
-
-# ================= FAST FILTER =================
-def fast_filter(symbol):
-    try:
-        df = safe_download(symbol, period="1d")
-        if df.empty:
-            return False
-        price = df["close"].iloc[-1]
-        volume = df["volume"].iloc[-1]
-        return MIN_PRICE < price < MAX_PRICE and volume > MIN_VOLUME
-    except:
-        return False
 
 # ================= TRADE MANAGEMENT =================
 def open_trade(symbol, price, score, df, is_accumulating=False, is_pre_breakout=False, phase="REGULAR", settings=None):
@@ -776,7 +696,7 @@ def background_monitor():
             reset_halt_counter_if_needed()
             if get_market_phase() != "CLOSED":
                 update_trades()
-                monitor_trading_halts() 
+                monitor_trading_halts()
             time.sleep(TRADE_MONITOR_INTERVAL)
         except Exception as e:
             logger.error(f"Monitor error: {e}")
@@ -876,7 +796,7 @@ if bot:
             send_telegram(msg)
         except Exception as e:
             send_telegram(f"❌ Error: {e}")
-            
+
 @bot.message_handler(commands=['news'])
 def cmd_news(message):
     try:
@@ -898,7 +818,6 @@ def cmd_news(message):
         translator = GoogleTranslator(source='en', target='ar')
         msg = f"📰 *أخبار {symbol}*\n\n"
         
-        # كلمات للتحليل
         positive_words = ['surge', 'gain', 'rise', 'up', 'growth', 'partnership', 'patent', 'expansion', 'profit', 'record', 'high', 'positive', 'opportunity', 'breakthrough', 'launch', 'award', 'contract', 'deal']
         negative_words = ['layoff', 'sell', 'drop', 'down', 'loss', 'reverse', 'investigation', 'lawsuit', 'cut', 'decline', 'fall', 'low', 'negative', 'risk', 'warning', 'sue', 'fine', 'penalty']
         
@@ -911,13 +830,11 @@ def cmd_news(message):
             link = item.get('link', '#')
             publisher = item.get('publisher', 'Unknown')
             
-            # ترجمة العنوان
             try:
                 title_ar = translator.translate(title)
             except:
                 title_ar = title
             
-            # تحليل المشاعر
             title_lower = title.lower()
             is_positive = any(word in title_lower for word in positive_words)
             is_negative = any(word in title_lower for word in negative_words)
@@ -936,7 +853,6 @@ def cmd_news(message):
             msg += f"  {title_ar}\n"
             msg += f"  [رابط الخبر]({link})\n\n"
         
-        # إضافة التحليل النهائي
         msg += f"\n📊 *تحليل الأخبار:*\n"
         msg += f"🟢 إيجابي: {positive_count}\n"
         msg += f"🔴 سلبي: {negative_count}\n"
@@ -953,6 +869,7 @@ def cmd_news(message):
         
     except Exception as e:
         send_telegram(f"❌ خطأ: {e}")
+
 # ================= MAIN =================
 if __name__ == "__main__":
     load_state()

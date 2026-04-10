@@ -51,7 +51,7 @@ TP_PCT = 1.06
 SL_PCT = 0.97
 
 # Fast Filter Thresholds
-MIN_PRICE = 0.7
+MIN_PRICE = 0.1
 MAX_PRICE = 500
 MIN_VOLUME = 50000
 

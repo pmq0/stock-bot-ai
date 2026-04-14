@@ -939,9 +939,8 @@ if bot:
             send_telegram(f"✅ {symbol} closed")
         except Exception as e:
             send_telegram(f"❌ Error: {e}")
-
-    @bot.message_handler(commands=['scan'])
-    def cmd_scan(message):
+@bot.message_handler(commands=['scan'])
+def cmd_scan(message):
     if not ensure_authorized(message):
         return
     try:
@@ -952,7 +951,6 @@ if bot:
         symbol = args[1].upper()
         send_telegram(f"🔍 Analyzing {symbol}...")
         
-        # 🔥 التغيير: استخدم فترة 1d و interval 5m عشان تجيب بيانات أحدث
         df = safe_download(symbol, period="1d", interval="5m")
         if df.empty:
             send_telegram(f"❌ No data for {symbol}")
@@ -962,7 +960,6 @@ if bot:
         df = compute_indicators(df)
         last = df.iloc[-1]
         
-        # 🔥 حساب حجم التداول من آخر 5 شمعات (عشان ما يطلع 0)
         last_5_volume = df['volume'].tail(5).sum()
         avg_volume = df['volume'].mean()
         
@@ -972,25 +969,21 @@ if bot:
         vol_surge = last['volume'] > df['vol_ma'].iloc[-1] * 2.0
         price_break = last['close'] > df['high'].iloc[-20:-1].max()
         score = 0
-        if vol_surge: score += 40
-        if price_break: score += 40
-        if 40 < last['rsi'] < 70: score += 10
-        if last['ema9'] > last['ema21']: score += 10
+        if vol_surge:
+            score += 40
+        if price_break:
+            score += 40
+        if 40 < last['rsi'] < 70:
+            score += 10
+        if last['ema9'] > last['ema21']:
+            score += 10
         
-        # 🔥 عرض الحجم بطريقة أفضل
         volume_display = int(last['volume']) if last['volume'] > 0 else int(last_5_volume / 5)
         
-        msg = f"📊 *{symbol}*\n"
-        msg += f"💰 ${last['close']:.2f}\n"
-        msg += f"📊 Vol: {volume_display:,}\n"
-        msg += f"📈 Avg Vol: {int(avg_volume):,}\n"
-        msg += f"⚡ RSI: {last['rsi']:.1f}\n"
-        msg += f"🎯 Score: {score}/{settings['min_score']}"
-        
+        msg = f"📊 *{symbol}*\n💰 ${last['close']:.2f}\n📊 Vol: {volume_display:,}\n📈 Avg Vol: {int(avg_volume):,}\n⚡ RSI: {last['rsi']:.1f}\n🎯 Score: {score}/{settings['min_score']}"
         send_telegram(msg)
     except Exception as e:
         send_telegram(f"❌ Error: {e}")
-
 if bot:
     @bot.message_handler(commands=['news'])
     def cmd_news(message):

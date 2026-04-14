@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
+import re  # 🔥 أضف هذا أيضاً
 
 import pandas as pd
 import numpy as np
@@ -22,6 +23,7 @@ import telebot
 from tenacity import retry, stop_after_attempt, wait_exponential
 from curl_cffi import requests
 import ftplib
+from bs4 import BeautifulSoup  # 🔥 هذا السطر الجديد
 
 # ================= CONFIGURATION =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")

@@ -346,7 +346,7 @@ def get_stop_price(symbol):
 def monitor_trading_halts():
     """مراقبة إيقافات التداول وإرسال تنبيه"""
     try:
-        url = "https://www.nasdaqtrader.com/dynamic/TradeHalts.csv"
+        url = "https://www.nasdaqtrader.com/trader.aspx?id=tradehalts"
         
         response = requests.get(url, impersonate="chrome120", timeout=15)
         

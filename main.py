@@ -456,18 +456,162 @@ def monitor_trading_halts():
                     change_pct    = price_info['change_pct']
                     direction     = "🟢 صعود ⬆️" if change_pct > 0 else "🔴 نزول ⬇️" if change_pct < 0 else "⚪ ثابت"
                 else:
+def monitor_trading_halts():
+    """مراقبة إيقافات التداول وإرسال تنبيه (باستخدام Ajax بدلاً من CSV)"""
+    try:
+        # 🔥 التغيير الوحيد: الرابط وطريقة الطلب
+        url = "https://www.nasdaqtrader.com/RPCHandler.axd"
+        
+        headers = {
+            "Accept-Language": "en-US,en;q=0.8",
+            "Connection": "keep-alive",
+            "Referer": "https://www.nasdaqtrader.com/trader.aspx?id=TradeHalts",
+            "Content-Type": "application/json"
+        }
+        
+        post_data = {
+            "id": 1,
+            "method": "BL_TradeHalt.GetTradeHalts",
+            "params": "[]",
+            "version": "1.1"
+        }
+        
+        response = requests.post(url, data=json.dumps(post_data), headers=headers, timeout=15)
+        
+        if response.status_code != 200:
+            logger.warning(f"Failed to fetch halts data, status code: {response.status_code}")
+            return
+        
+        # استخراج HTML من الـ JSON
+        data = response.json()
+        result_html = data.get('result', '')
+        
+        if not result_html:
+            return
+        
+        # تحويل HTML إلى نص قابل للقراءة مثل ما كان الكود القديم يتوقع CSV
+        soup = BeautifulSoup(result_html, 'html.parser')
+        table = soup.find('table')
+        
+        if not table:
+            return
+        
+        # 🔥 باقي الكود (من هنا لنهاية الدالة) هو نفسه 100% كما كان عندك
+        lines = []
+        rows = table.find_all('tr')
+        for row in rows:
+            cols = row.find_all('td')
+            if cols:
+                # تحويل الصف إلى صيغة CSV عشان الكود القديم يفهمها
+                line = ','.join([f'"{col.get_text(strip=True)}"' for col in cols])
+                lines.append(line)
+        
+        if not lines:
+            return
+
+        # أكواد الإيقاف الكاملة حسب NASDAQ (نفس الكود اللي عندك)
+        HALT_CODES = {
+            "T1":   ("🔴", "إيقاف - أخبار قيد الانتظار (News Pending)"),
+            "T2":   ("🟡", "إيقاف - أخبار صدرت (News Released)"),
+            "T5":   ("🟠", "إيقاف - توقف تداول سهم واحد (Single Stock Pause)"),
+            "T6":   ("🔴", "إيقاف - نشاط سوق غير اعتيادي (Extraordinary Activity)"),
+            "T8":   ("🟠", "إيقاف - صندوق ETF"),
+            "T12":  ("🟡", "إيقاف - طلب معلومات إضافية من NASDAQ"),
+            "H4":   ("🔴", "إيقاف - عدم امتثال (Non-compliance)"),
+            "H9":   ("🔴", "إيقاف - ملفات غير محدّثة (Not Current)"),
+            "H10":  ("🔴", "إيقاف - تعليق تداول من SEC"),
+            "H11":  ("🔴", "إيقاف - مخاوف تنظيمية (Regulatory Concern)"),
+            "O1":   ("🟠", "إيقاف تشغيلي (Operations Halt)"),
+            "IPO1": ("🔵", "IPO - لم يبدأ التداول بعد"),
+            "M1":   ("🟡", "إجراء شركة (Corporate Action)"),
+            "M2":   ("⚪", "اقتباس غير متاح (Quotation Not Available)"),
+            "LUDP": ("🔴", "توقف تداول - تذبذب (Volatility Pause)"),
+            "LUDS": ("🔴", "توقف تداول - Straddle Condition"),
+            "MWC1": ("🚨", "توقف السوق كله - المستوى 1 (Circuit Breaker L1)"),
+            "MWC2": ("🚨", "توقف السوق كله - المستوى 2 (Circuit Breaker L2)"),
+            "MWC3": ("🚨", "توقف السوق كله - المستوى 3 (Circuit Breaker L3)"),
+            "MWC0": ("🚨", "توقف Circuit Breaker - ترحيل من يوم سابق"),
+            "M":    ("🟠", "توقف تذبذب - سهم مدرج (Volatility Pause Listed)"),
+            "D":    ("⚫", "حذف السهم من NASDAQ/CQS"),
+        }
+
+        new_halts = []
+        current_date = datetime.now(EASTERN_TZ).strftime('%m/%d/%Y')
+
+        # تخطي السطر الأول (header) - نفس الكود القديم
+        for line in lines:
+            try:
+                parts = [p.strip().strip('"') for p in line.split(',')]
+                if len(parts) < 4:
+                    continue
+
+                halt_date           = parts[0] if len(parts) > 0 else ''
+                halt_time           = parts[1] if len(parts) > 1 else ''
+                symbol              = parts[2] if len(parts) > 2 else ''
+                name                = parts[3] if len(parts) > 3 else ''
+                market              = parts[4] if len(parts) > 4 else ''
+                reason              = parts[5] if len(parts) > 5 else ''
+                pause_price         = parts[6] if len(parts) > 6 else ''
+                resume_date         = parts[7] if len(parts) > 7 else ''
+                resume_quote_time   = parts[8] if len(parts) > 8 else ''
+                resume_trade_time   = parts[9] if len(parts) > 9 else ''
+
+                if not symbol or not halt_date:
+                    continue
+
+                if halt_date != current_date:
+                    continue
+
+                resume_codes = {"T3","T7","R4","R9","C3","C4","C9","C11","R1","R2","IPOQ","IPOE","MWCQ"}
+                if reason.upper() in resume_codes:
+                    continue
+
+                with state_lock:
+                    halt_key = f"{symbol}_{halt_time}"
+                    if halt_key not in state.get("halted_stocks", {}):
+                        new_halts.append({
+                            'symbol':           symbol,
+                            'name':             name,
+                            'halt_time':        halt_time,
+                            'market':           market,
+                            'reason':           reason.upper(),
+                            'pause_price':      pause_price,
+                            'resume_date':      resume_date,
+                            'resume_quote_time':resume_quote_time,
+                            'resume_trade_time':resume_trade_time,
+                        })
+                        if "halted_stocks" not in state:
+                            state["halted_stocks"] = {}
+                        state["halted_stocks"][halt_key] = {
+                            'time': halt_time,
+                            'date': halt_date
+                        }
+
+            except Exception as parse_err:
+                logger.warning(f"Halt line parse error: {parse_err}")
+                continue
+
+        save_state()
+
+        # 🔥 باقي الكود حق إرسال الرسائل (نفس ما كان عندك بالضبط)
+        for halt in new_halts:
+            try:
+                price_info = get_stop_price(halt['symbol'])
+                if price_info:
+                    current_price = price_info['price']
+                    change_pct    = price_info['change_pct']
+                    direction     = "🟢 صعود ⬆️" if change_pct > 0 else "🔴 نزول ⬇️" if change_pct < 0 else "⚪ ثابت"
+                else:
                     current_price = None
                     change_pct    = 0
                     direction     = "⚪ غير معروف"
 
-                # عداد الإيقافات
                 with state_lock:
                     if "halt_counter" not in state:
                         state["halt_counter"] = {}
                     state["halt_counter"][halt['symbol']] = state["halt_counter"].get(halt['symbol'], 0) + 1
                     halt_count = state["halt_counter"][halt['symbol']]
 
-                # نص السبب والإيموجي
                 emoji, reason_text = HALT_CODES.get(halt['reason'], ("⚠️", f"كود {halt['reason']}"))
 
                 msg  = f"{emoji} *تنبيه: إيقاف تداول*\n"
@@ -480,16 +624,13 @@ def monitor_trading_halts():
                 msg += f"⏰ وقت الإيقاف: *{halt['halt_time']} EST*\n"
                 msg += f"📋 السبب: {reason_text}\n"
 
-                # سعر الإيقاف (Pause Threshold Price)
                 if halt['pause_price'] and halt['pause_price'] not in ('', 'N/A', '0', '0.0'):
                     msg += f"💲 سعر عتبة الإيقاف: ${halt['pause_price']}\n"
 
-                # السعر الحالي
                 if current_price is not None:
                     msg += f"💰 السعر الحالي: *${current_price:.2f}*\n"
                     msg += f"📈 التغير: {change_pct:+.2f}%  {direction}\n"
 
-                # وقت الاستئناف
                 has_resume = any([halt['resume_date'], halt['resume_quote_time'], halt['resume_trade_time']])
                 if has_resume:
                     msg += f"━━━━━━━━━━━━━━━━\n"
@@ -507,7 +648,6 @@ def monitor_trading_halts():
 
                 send_telegram(msg)
 
-                # 🔥 أضف السهم لقائمة المراقبة بعد رفع الإيقاف
                 BULLISH_HALT_CODES = {"T1", "T2", "LUDP", "T5", "T6", "M1"}
                 if halt['reason'] in BULLISH_HALT_CODES:
                     with state_lock:

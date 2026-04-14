@@ -941,7 +941,7 @@ if bot:
             send_telegram(f"❌ Error: {e}")
 
     @bot.message_handler(commands=['scan'])
-def cmd_scan(message):
+  def cmd_scan(message):
     if not ensure_authorized(message):
         return
     try:

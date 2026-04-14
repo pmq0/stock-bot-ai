@@ -7,3 +7,4 @@ matplotlib==3.7.1
 tenacity==8.2.3
 curl_cffi==0.7.1
 deep-translator==1.11.4
+beautifulsoup4==4.12.3

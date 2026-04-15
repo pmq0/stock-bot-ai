@@ -384,77 +384,7 @@ def monitor_trading_halts():
             "LUDP": ("🔴", "توقف تداول - تذبذب (Volatility Pause)"),
             "LUDS": ("🔴", "توقف تداول - Straddle Condition"),
             "MWC1": ("🚨", "توقف السوق كله - المستوى 1 (Circuit Breaker L1)"),
-            "MWC2": ("🚨", "توقف السوق كله - المستوى 2 (Circuit Breaker L2)"),
-            "MWC3": ("🚨", "توقف السوق كله - المستوى 3 (Circuit Breaker L3)"),
-            "MWC0": ("🚨", "توقف Circuit Breaker - ترحيل من يوم سابق"),
-            "M":    ("🟠", "توقف تذبذب - سهم مدرج (Volatility Pause Listed)"),
-            "D":    ("⚫", "حذف السهم من NASDAQ/CQS"),
-        }
 
-        new_halts = []
-        current_date = datetime.now(EASTERN_TZ).strftime('%m/%d/%Y')
-
-        # تخطي السطر الأول (header)
-        for line in lines[1:]:
-            try:
-                # الأعمدة: HaltDate, HaltTime, Symbol, Name, Mkt, ReasonCode, PausePrice, ResumptionDate, ResumptionQuoteTime, ResumptionTradeTime
-                parts = [p.strip().strip('"') for p in line.split(',')]
-                if len(parts) < 4:
-                    continue
-
-                halt_date           = parts[0] if len(parts) > 0 else ''
-                halt_time           = parts[1] if len(parts) > 1 else ''
-                symbol              = parts[2] if len(parts) > 2 else ''
-                name                = parts[3] if len(parts) > 3 else ''
-                market              = parts[4] if len(parts) > 4 else ''
-                reason              = parts[5] if len(parts) > 5 else ''
-                pause_price         = parts[6] if len(parts) > 6 else ''
-                resume_date         = parts[7] if len(parts) > 7 else ''
-                resume_quote_time   = parts[8] if len(parts) > 8 else ''
-                resume_trade_time   = parts[9] if len(parts) > 9 else ''
-
-                if not symbol or not halt_date:
-                    continue
-
-                # فقط أحداث اليوم
-                if halt_date != current_date:
-                    continue
-
-                # تجاهل أكواد الاستئناف (Resume codes)
-                resume_codes = {"T3","T7","R4","R9","C3","C4","C9","C11","R1","R2","IPOQ","IPOE","MWCQ"}
-                if reason.upper() in resume_codes:
-                    continue
-
-                with state_lock:
-                    halt_key = f"{symbol}_{halt_time}"
-                    if halt_key not in state.get("halted_stocks", {}):
-                        new_halts.append({
-                            'symbol':           symbol,
-                            'name':             name,
-                            'halt_time':        halt_time,
-                            'market':           market,
-                            'reason':           reason.upper(),
-                            'pause_price':      pause_price,
-                            'resume_date':      resume_date,
-                            'resume_quote_time':resume_quote_time,
-                            'resume_trade_time':resume_trade_time,
-                        })
-                        if "halted_stocks" not in state:
-                            state["halted_stocks"] = {}
-                        state["halted_stocks"][halt_key] = {
-                            'time': halt_time,
-                            'date': halt_date
-                        }
-
-            except Exception as parse_err:
-                logger.warning(f"Halt line parse error: {parse_err}")
-                continue
-
-        save_state()
-
-        for halt in new_halts:
-            try:
-                # جلب السعر الحالي
 def monitor_trading_halts():
     """مراقبة إيقافات التداول وإرسال تنبيه (باستخدام API الرسمي)"""
     try:

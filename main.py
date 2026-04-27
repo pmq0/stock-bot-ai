@@ -1088,12 +1088,11 @@ def calculate_rvol(df):
         current_vol = df['volume'].iloc[-1]
         avg_vol = df['volume'].rolling(20).mean().iloc[-1]
         if avg_vol is None or avg_vol <= 0:
-    return 1.0
+            return 1.0
         return round(current_vol / avg_vol, 2)
     except:
         return 1.0
-
-
+        
 def calculate_mfi(df, period=14):
     """
     Money Flow Index - يقيس تدفق المال داخل السهم

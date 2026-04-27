@@ -135,7 +135,7 @@ def fast_momentum_scanner():
         time.sleep(0.5)
 
 def fast_filter(symbol):
-    """🔥 فلتر واسع يمسك أي شي، والتحليل العميق هو اللي يقرر"""
+    """🔥 فلتر واسع جداً - يمرر أي سهم تقريباً للتحليل العميق"""
     try:
         df = cached_download(symbol, period="1d", interval="15m", timeout=5)
         if df.empty or len(df) < 3:
@@ -143,18 +143,11 @@ def fast_filter(symbol):
 
         price = df["close"].iloc[-1]
         volume = df["volume"].iloc[-1]
-        avg_volume = df["volume"].mean()
 
-        # فقط استثناء الأسعار الخيالية جداً
-        if price < 0.2 or price > 2000:
+        if price < 0.1 or price > 2000:
             return False
 
-        # أي حجم فوق 20,000 (واسع جداً)
-        if volume < 20000:
-            return False
-
-        # أي زيادة عن المتوسط ولو بسيطة
-        if avg_volume > 0 and volume < avg_volume * 0.8:
+        if volume < 10000:
             return False
 
         return True
@@ -1741,8 +1734,10 @@ def update_trades():
 
 # ================= SCANNER ENGINE =================
 def background_scanner():
+    time.sleep(10)  # انتظر 10 ثواني عشان الجامعة تتحمل
     update_all_tickers()
     while True:
+        # ... الباقي نفس ما هو
         try:
             fast_momentum_scanner()
             phase = get_market_phase()

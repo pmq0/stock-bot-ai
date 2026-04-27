@@ -135,12 +135,12 @@ def fast_momentum_scanner():
         time.sleep(0.5)
 
 def fast_filter(symbol):
-    """فلتر مؤقت - يمرر كل الأسهم للاختبار"""
+    """فلتر مؤقت - يمرر كل الأسهم"""
     try:
         df = cached_download(symbol, period="1d", interval="15m", timeout=5)
         if df.empty or len(df) < 3:
             return False
-        # يمرر كل شي له بيانات
+        # أي سهم له بيانات يمرر
         return True
     except:
         return False

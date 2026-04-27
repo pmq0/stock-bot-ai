@@ -639,7 +639,6 @@ MINIMAL_UNIVERSE = [
 ]
 
 def update_all_tickers():
-def update_all_tickers():
     global state
     
     tickers = set()

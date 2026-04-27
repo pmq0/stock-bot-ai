@@ -984,7 +984,6 @@ def scan_vshape_opportunities():
 
 
 def rvol_spike_scanner():
-    """يراقب الأسهم اللي RVOL حقق قفزة استثنائية (أكثر من 5x)"""
     while True:
         try:
             phase = get_market_phase()
@@ -995,10 +994,6 @@ def rvol_spike_scanner():
             with state_lock:
                 tickers = list(state.get("tickers", []))
             
-            if not tickers:
-                time.sleep(60)
-                continue
-            
             for symbol in tickers[:300]:
                 try:
                     df = cached_download(symbol, period="5d", interval="15m")
@@ -1006,9 +1001,15 @@ def rvol_spike_scanner():
                         continue
                     
                     df.columns = [c.lower() for c in df.columns]
-                    rvol = calculate_rvol(df, phase=get_market_phase())
+                    rvol = calculate_rvol(df, phase=phase)
+                    
+                    # ✅ فلتر إضافي: تأكد أن الحجم الحقيقي أكبر من الصفر
+                    current_vol = df['volume'].iloc[-1]
+                    if current_vol <= 0:
+                        continue  # لا ترسل إشارة إذا الحجم = 0
                     
                     if rvol >= 5:
+                        # ... باقي الكود
                         signal_key = f"rvol_{symbol}"
                         with state_lock:
                             last_sent = state.get("seen_signals", {}).get(signal_key, 0)

@@ -135,27 +135,26 @@ def fast_momentum_scanner():
         time.sleep(0.5)
 
 def fast_filter(symbol):
-    """🔥 Rocket Scanner - فلتر قوي يصطاد الأسهم المتفجرة فقط"""
+    """🔥 فلتر معدل لصيد أسهم قوية ذات انفجار حجم حقيقي"""
     try:
-        # تقليل وقت التحميل في الفلتر الأولي لزيادة السرعة
         df = cached_download(symbol, period="1d", interval="15m", timeout=5)
-        if df.empty or len(df) < 2:
+        if df.empty or len(df) < 5:
             return False
 
         price = df["close"].iloc[-1]
         volume = df["volume"].iloc[-1]
-        avg_volume = df["volume"].mean()
+        avg_volume = df["volume"].rolling(20).mean().iloc[-1]
 
-        # فلتر السعر: تم توسيع النطاق ليشمل الأسهم المتفجرة حتى 200 دولار (مثل MGRT)
-        if price < 0.5 or price > 200:
+        # فلتر السعر: أسهم حقيقية (مو penny stock ولا خيالية)
+        if price < 1.5 or price > 500:
             return False
 
-        # فلتر حجم التداول: خفض الحد الأدنى لـ 50 ألف لضمان التقاط الأسهم ذات السيولة المنخفضة والمتفجرة (مثل MGRT و PBM)
-        if volume < 50000:
+        # سيولة كافية
+        if volume < 100000:
             return False
 
-        # فلتر الانفجار: خفض شرط الانفجار الأولي لـ 1.1x للسماح بالتقييم العميق للفرص الواعدة
-        if avg_volume > 0 and volume < avg_volume * 1.1:
+        # انفجار حجم حقيقي: الحجم الحالي > 2× المتوسط
+        if avg_volume <= 0 or volume < avg_volume * 2.0:
             return False
 
         return True

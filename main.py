@@ -701,70 +701,57 @@ def update_all_tickers():
 
     # ===== المصدر الثاني: GitHub (قائمة بديلة) =====
     # قائمة بمصادر بديلة (أحدهما سيعمل) لضمان جلب الـ 3800 سهم على Railway
-    ticker_sources = [
-        "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/nasdaq/nasdaq_tickers.txt",
-        "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv",
-        "https://raw.githubusercontent.com/jamesbcook/Trading-View-Stock-Screener/main/Resources/stock_lists/NASDAQ.txt",
-        "https://raw.githubusercontent.com/r1b/ticker-symbols/main/data/nasdaq_tickers.csv",
-        "https://raw.githubusercontent.com/shilewenuw/get_all_tickers/master/get_all_tickers/tickers/nasdaq.csv"
-    ]
+def update_all_tickers():
+    global state
+    all_tickers = set()
     
-    # إضافة Headers احترافية لضمان قبول الطلب من GitHub
-                    logger.warning(f"Source {source_url} returned empty or too small content.")
-                    continue
+    # ===== المصدر الأول: SEC EDGAR =====
+    try:
+        logger.info("🔄 Fetching from SEC EDGAR...")
+        sec_resp = requests.get("https://www.sec.gov/files/company_tickers.json", 
+                                headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
+        if sec_resp.status_code == 200:
+            for v in sec_resp.json().values():
+                t = v.get("ticker")
+                if t and t.isalpha() and 1 <= len(t) <= 5:
+                    all_tickers.add(t.upper())
+    except Exception as e:
+        logger.warning(f"SEC EDGAR failed: {e}")
 
-                lines = content.strip().split('\n')
-                temp_tickers = []
-                for line in lines:
-                    line = line.strip().upper()
-                    # تخطي السطور غير المفيدة
-                    if not line or any(x in line for x in ['SYMBOL', 'TICKER', 'NAME', 'FILE']):
-                        continue
-                    
-                    # استخراج الرمز بذكاء (سواء كان CSV أو TXT)
-                    if ',' in line:
-                        symbol = line.split(',')[0].replace('"', '').strip()
-                    elif '\t' in line:
-                        symbol = line.split('\t')[0].strip()
-                    else:
-                        symbol = line.split()[0].strip() if line.split() else line
-                    
-                    # فلتر الرموز الصالحة (بين 1 و 5 أحرف)
-                    if symbol.isalpha() and 1 <= len(symbol) <= 5:
-                        temp_tickers.append(symbol)
-                
-                if len(temp_tickers) > 500:
-                    tickers = temp_tickers
-                    logger.info(f"✅ Successfully fetched {len(tickers)} tickers from {source_url}")
-                    break
-                else:
-                    logger.warning(f"Source {source_url} only provided {len(temp_tickers)} tickers. Trying next...")
-            else:
-                logger.warning(f"Source {source_url} returned status code: {response.status_code}")
-                    
-        except Exception as e:
-            logger.warning(f"Source {source_url} failed with error: {str(e)}")
-            continue
-    
-    # إزالة التكرارات
-    clean = list(dict.fromkeys(tickers))
-    
-    if len(clean) > 100:
-        clean = clean[:MAX_TICKERS_TO_SCAN]
+    # ===== المصدر الثاني: NASDAQ + NYSE =====
+    for url in [
+        "https://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
+        "https://ftp.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
+    ]:
+        try:
+            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+            if resp.status_code == 200:
+                for line in resp.text.split('\n')[1:]:
+                    parts = line.split('|')
+                    if len(parts) > 0:
+                        t = parts[0].strip()
+                        if t and t.isalpha() and 1 <= len(t) <= 5:
+                            all_tickers.add(t.upper())
+        except:
+            pass
+
+    # ===== إذا نجحنا في جلب البيانات =====
+    if len(all_tickers) > 100:
+        final_list = sorted(list(all_tickers))[:MAX_TICKERS_TO_SCAN]
         with state_lock:
-            state["tickers"] = clean
+            state["tickers"] = final_list
             state["last_ticker_update"] = datetime.now().isoformat()
             save_state()
-        logger.info(f"✅ Universe updated: {len(clean)} stocks")
-        send_telegram(f"📊 Universe updated: {len(clean)} stocks")
-        return clean
+        logger.info(f"✅ Universe updated: {len(final_list)} stocks")
+        send_telegram(f"📊 Universe: {len(final_list)} stocks ready")
+        return final_list
     
-    # إذا فشل كل شيء، استخدم القائمة الاحتياطية
-    logger.warning(f"All sources failed. Using extended minimal universe ({len(MINIMAL_UNIVERSE)} symbols)")
+    # ===== إذا فشل كل شيء، قائمة احتياطية =====
+    backup = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX"]
     with state_lock:
-        state["tickers"] = MINIMAL_UNIVERSE
+        state["tickers"] = backup
         save_state()
-    return MINIMAL_UNIVERSE
+    return backup
 
 # ================= RISK MANAGEMENT =================
 def calculate_position_size(price):

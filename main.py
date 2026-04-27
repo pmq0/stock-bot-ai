@@ -135,17 +135,8 @@ def fast_momentum_scanner():
         time.sleep(0.5)
 
 def fast_filter(symbol):
-    """فلتر مؤقت - يمرر كل الأسهم"""
-    try:
-        # force_refresh=True عشان نتجاوز الكاش
-        df = cached_download(symbol, period="1d", interval="15m", timeout=5, force_refresh=True)
-        if df.empty or len(df) < 3:
-            return False
-        # يمرر كل شي له بيانات
-        return True
-    except Exception as e:
-        logger.debug(f"fast_filter error {symbol}: {e}")
-        return False
+    """فلتر يمرر كل الأسهم - للاختبار فقط"""
+    return True
         
 # ================= MARKET PHASE SETTINGS =================
 PHASE_SETTINGS = {

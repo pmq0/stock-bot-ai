@@ -638,14 +638,7 @@ MINIMAL_UNIVERSE = [
     "INTC", "PLTR", "SOFI", "NIO", "GME", "AMC", "RIOT", "MARA", "COIN"
 ]
 
-def update_all_tickers():
-    global state
-    
-    tickers = set()
-    
-    # ===== NASDAQ الرسمي =====
-    try:
-        url = "https://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+
 def update_all_tickers():
     global state
     

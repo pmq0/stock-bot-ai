@@ -1450,14 +1450,31 @@ def process_symbol(symbol):
         price_break = last['close'] > df['high'].iloc[-10:-1].max()
         
         score = explosion_score
-        if vol_surge: score += 25  # زيادة وزن الحجم
-        if price_break: score += 25 # زيادة وزن السعر
+        if vol_surge: score += 25
+        if price_break: score += 25
         if 40 < last['rsi'] < 70: score += 10
         if last['ema9'] > last['ema21']: score += 10
 
+        # 📊 RVOL - الحجم النسبي
+        rvol = calculate_rvol(df)
+
+        # ✅ تصحيح RVOL
+        if rvol == 0.0 or pd.isna(rvol):
+            try:
+                current_vol = last['volume']
+                avg_vol = df['volume'].rolling(20).mean().iloc[-1]
+                if avg_vol > 0:
+                    rvol = round(current_vol / avg_vol, 2)
+                else:
+                    rvol = 1.0
+            except:
+                rvol = 1.0
+
+        if rvol >= 5:    score += 15
+        elif rvol >= 3:  score += 10
+        elif rvol >= 2:  score += 5
         
-        
-        # 🎯 Low Float - أسهم رخيصة تتحرك أسرع
+        # 🎯 Low Float
         low_float = is_low_float(last['close'], last['volume'])
         if low_float:
             score += 10
@@ -1470,40 +1487,18 @@ def process_symbol(symbol):
         if is_raw_momentum:
             score += 15
 
-        # 📊 ATR - تقييم التقلب (Volatility)
+        # 📊 ATR
         atr = calculate_atr(df)
         price = last['close']
-        # فلتر: تجاهل الأسهم شديدة التقلب (أكثر من 30% من السعر)
         if atr > price * 0.3:
-               logger.info(f"Skipping {symbol}: Extreme volatility (ATR {atr} > 30% of price {price})")
-    return
-
-# بونص في السكور: إذا التقلب معقول وصحي (بين 3% و 20% من السعر)
-if 0.03 * price <= atr <= 0.20 * price:
-    score += 5
-
-# 📊 RVOL - الحجم النسبي (أهم من الحجم المطلق)
-rvol = calculate_rvol(df)
-
-# ✅ تصحيح RVOL
-if rvol == 0.0 or pd.isna(rvol):
-    try:
-        current_vol = last['volume']
-        avg_vol = df['volume'].rolling(20).mean().iloc[-1]
-        if avg_vol > 0:
-            rvol = round(current_vol / avg_vol, 2)
-        else:
-            rvol = 1.0
-    except:
-        rvol = 1.0
-
-if rvol >= 5:    score += 15
-elif rvol >= 3:  score += 10
-elif rvol >= 2:  score += 5
-
-# 🧠 بونص الحاجز النفسي
-if is_psych_break:
-    score += 10
+            logger.info(f"Skipping {symbol}: Extreme volatility (ATR {atr} > 30% of price {price})")
+            return
+        if 0.03 * price <= atr <= 0.20 * price:
+            score += 5
+            
+        # 🧠 بونص الحاجز النفسي
+        if is_psych_break:
+            score += 10
             
         # ⚡ بونص الفجوة المفاجئة
         if is_sudden_gap:
@@ -1538,13 +1533,8 @@ if is_psych_break:
         # ⏰ بونص توقيت الجلسة
         score += get_time_score()
 
-        # خصم جودة الاتجاه إذا كان السهم أسفل SMA50 بدل رفضه نهائياً
         score -= trend_penalty
         effective_min_score = get_effective_min_score(phase, settings)
-
-        # 🛡️ فلتر VWAP + RSI (تم تخفيفه لزيادة الفرص)
-        price_above_vwap = last['close'] > last['vwap'] * 0.99 # نسمح بـ 1% تحت الـ VWAP
-        rsi_ok           = last['rsi'] > 45 # خفضنا الـ RSI من 50 لـ 45
 
         if score >= effective_min_score:
             now = time.time()
@@ -1560,7 +1550,6 @@ if is_psych_break:
                     state["seen_signals"][symbol] = now
                     save_state()
         elif score >= 60:
-            # إرسال تنبيه "فرصة للمراقبة" لزيادة التفاعل
             now = time.time()
             signal_key = f"watch_{symbol}_{int(now/3600)}"
             with state_lock:
@@ -1569,7 +1558,6 @@ if is_psych_break:
                     msg += f"━━━━━━━━━━━━━━━━\n"
                     msg += f"📊 السكور: *{score}/100*\n"
                     msg += f"💰 السعر: ${last['close']:.2f}\n"
-                    msg += f"🔍 الحالة: {reason_str}\n"
                     msg += f"💡 السهم يظهر بوادر إيجابية، تابعه يدوياً!"
                     send_telegram(msg)
                     state.setdefault("seen_signals", {})[signal_key] = now

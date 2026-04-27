@@ -639,12 +639,12 @@ MINIMAL_UNIVERSE = [
 ]
 
 def update_all_tickers():
+def update_all_tickers():
     global state
     
-    # قائمة أسهم من NASDAQ + NYSE مباشرة
     tickers = set()
     
-    # مصدر NASDAQ الرسمي
+    # ===== NASDAQ الرسمي =====
     try:
         url = "https://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
         resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
@@ -654,10 +654,11 @@ def update_all_tickers():
                     symbol = line.split('|')[0].strip()
                     if symbol and symbol.isalpha() and 2 <= len(symbol) <= 5:
                         tickers.add(symbol)
+            logger.info(f"✅ NASDAQ: {len(tickers)} tickers")
     except Exception as e:
-        logger.warning(f"NASDAQ fetch failed: {e}")
+        logger.warning(f"NASDAQ failed: {e}")
     
-    # مصدر NYSE
+    # ===== NYSE الرسمي =====
     try:
         url = "https://ftp.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
         resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
@@ -668,24 +669,30 @@ def update_all_tickers():
                     symbol = parts[1].strip()
                     if symbol and symbol.isalpha() and 2 <= len(symbol) <= 5:
                         tickers.add(symbol)
+            logger.info(f"✅ NYSE: Added more tickers")
     except Exception as e:
-        logger.warning(f"NYSE fetch failed: {e}")
+        logger.warning(f"NYSE failed: {e}")
     
-    if len(tickers) > 100:
+    # ===== إذا نجحنا =====
+    if len(tickers) > 200:
         final_list = sorted(list(tickers))[:MAX_TICKERS_TO_SCAN]
         with state_lock:
             state["tickers"] = final_list
+            state["last_ticker_update"] = datetime.now().isoformat()
             save_state()
         logger.info(f"✅ Universe updated: {len(final_list)} stocks")
+        send_telegram(f"📊 Universe: {len(final_list)} stocks ready")
         return final_list
     
-    # Backup: قائمة موسعة
-    backup = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX", "INTC", "PLTR", "SOFI", "NIO", "GME", "AMC"]
+    # ===== Backup: قائمة يدوية موسعة =====
+    backup = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX",
+              "INTC", "PLTR", "SOFI", "NIO", "GME", "AMC", "RIOT", "MARA", "COIN",
+              "MSTR", "ROKU", "PYPL", "UBER", "SNAP", "ZM", "BA", "DIS", "JPM"]
     with state_lock:
         state["tickers"] = backup
         save_state()
+    logger.info(f"⚠️ Using backup universe: {len(backup)} stocks")
     return backup
-
 # ================= RISK MANAGEMENT =================
 def calculate_position_size(price):
     stop_loss = price * SL_PCT

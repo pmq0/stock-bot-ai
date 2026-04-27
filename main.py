@@ -710,19 +710,6 @@ def update_all_tickers():
     ]
     
     # إضافة Headers احترافية لضمان قبول الطلب من GitHub
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/plain, text/csv'
-    }
-
-    for source_url in ticker_sources:
-        try:
-            logger.info(f"🔄 Trying source: {source_url}")
-            response = requests.get(source_url, headers=headers, timeout=20)
-            
-            if response.status_code == 200:
-                content = response.text
-                if not content or len(content) < 100:
                     logger.warning(f"Source {source_url} returned empty or too small content.")
                     continue
 

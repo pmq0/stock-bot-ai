@@ -1455,11 +1455,7 @@ def process_symbol(symbol):
         if 40 < last['rsi'] < 70: score += 10
         if last['ema9'] > last['ema21']: score += 10
 
-        # 📊 RVOL - الحجم النسبي (أهم من الحجم المطلق)
-        rvol = calculate_rvol(df)
-        if rvol >= 5:    score += 15   # نشاط استثنائي
-        elif rvol >= 3:  score += 10   # انفجار حجم قوي
-        elif rvol >= 2:  score += 5    # اهتمام متزايد
+        
         
         # 🎯 Low Float - أسهم رخيصة تتحرك أسرع
         low_float = is_low_float(last['close'], last['volume'])
@@ -1479,15 +1475,35 @@ def process_symbol(symbol):
         price = last['close']
         # فلتر: تجاهل الأسهم شديدة التقلب (أكثر من 30% من السعر)
         if atr > price * 0.3:
-            logger.info(f"Skipping {symbol}: Extreme volatility (ATR {atr} > 30% of price {price})")
-            return
-        # بونص في السكور: إذا التقلب معقول وصحي (بين 3% و 20% من السعر)
-        if 0.03 * price <= atr <= 0.20 * price:
-            score += 5
-            
-        # 🧠 بونص الحاجز النفسي
-        if is_psych_break:
-            score += 10
+               logger.info(f"Skipping {symbol}: Extreme volatility (ATR {atr} > 30% of price {price})")
+    return
+
+# بونص في السكور: إذا التقلب معقول وصحي (بين 3% و 20% من السعر)
+if 0.03 * price <= atr <= 0.20 * price:
+    score += 5
+
+# 📊 RVOL - الحجم النسبي (أهم من الحجم المطلق)
+rvol = calculate_rvol(df)
+
+# ✅ تصحيح RVOL
+if rvol == 0.0 or pd.isna(rvol):
+    try:
+        current_vol = last['volume']
+        avg_vol = df['volume'].rolling(20).mean().iloc[-1]
+        if avg_vol > 0:
+            rvol = round(current_vol / avg_vol, 2)
+        else:
+            rvol = 1.0
+    except:
+        rvol = 1.0
+
+if rvol >= 5:    score += 15
+elif rvol >= 3:  score += 10
+elif rvol >= 2:  score += 5
+
+# 🧠 بونص الحاجز النفسي
+if is_psych_break:
+    score += 10
             
         # ⚡ بونص الفجوة المفاجئة
         if is_sudden_gap:

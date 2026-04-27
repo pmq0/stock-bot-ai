@@ -135,26 +135,26 @@ def fast_momentum_scanner():
         time.sleep(0.5)
 
 def fast_filter(symbol):
-    """🔥 فلتر معدل لصيد أسهم قوية ذات انفجار حجم حقيقي"""
+    """🔥 فلتر واسع يمسك أي شي، والتحليل العميق هو اللي يقرر"""
     try:
         df = cached_download(symbol, period="1d", interval="15m", timeout=5)
-        if df.empty or len(df) < 5:
+        if df.empty or len(df) < 3:
             return False
 
         price = df["close"].iloc[-1]
         volume = df["volume"].iloc[-1]
-        avg_volume = df["volume"].rolling(20).mean().iloc[-1]
+        avg_volume = df["volume"].mean()
 
-        # فلتر السعر: أسهم حقيقية (مو penny stock ولا خيالية)
-        if price < 1.5 or price > 500:
+        # فقط استثناء الأسعار الخيالية جداً
+        if price < 0.2 or price > 2000:
             return False
 
-        # سيولة كافية
-        if volume < 100000:
+        # أي حجم فوق 20,000 (واسع جداً)
+        if volume < 20000:
             return False
 
-        # انفجار حجم حقيقي: الحجم الحالي > 2× المتوسط
-        if avg_volume <= 0 or volume < avg_volume * 2.0:
+        # أي زيادة عن المتوسط ولو بسيطة
+        if avg_volume > 0 and volume < avg_volume * 0.8:
             return False
 
         return True
@@ -162,7 +162,7 @@ def fast_filter(symbol):
     except Exception as e:
         logger.debug(f"fast_filter failed for {symbol}: {e}")
         return False
-
+        
 # ================= MARKET PHASE SETTINGS =================
 PHASE_SETTINGS = {
     "PRE":     {"min_score": 65,  "size_multiplier": 0.5, "vol_surge_mult": 1.5, "description": "🟡 Pre-Market"},

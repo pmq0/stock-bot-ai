@@ -135,25 +135,14 @@ def fast_momentum_scanner():
         time.sleep(0.5)
 
 def fast_filter(symbol):
-    """🔥 فلتر واسع جداً - يمرر أي سهم تقريباً للتحليل العميق"""
+    """فلتر مؤقت - يمرر كل الأسهم للاختبار"""
     try:
         df = cached_download(symbol, period="1d", interval="15m", timeout=5)
         if df.empty or len(df) < 3:
             return False
-
-        price = df["close"].iloc[-1]
-        volume = df["volume"].iloc[-1]
-
-        if price < 0.1 or price > 2000:
-            return False
-
-        if volume < 10000:
-            return False
-
+        # يمرر كل شي له بيانات
         return True
-
-    except Exception as e:
-        logger.debug(f"fast_filter failed for {symbol}: {e}")
+    except:
         return False
         
 # ================= MARKET PHASE SETTINGS =================
@@ -651,103 +640,47 @@ MINIMAL_UNIVERSE = [
 
 def update_all_tickers():
     global state
-    all_tickers = set()
     
-    # ===== المصدر الأول: SEC EDGAR (رسمي وشامل) =====
+    # قائمة أسهم من NASDAQ + NYSE مباشرة
+    tickers = set()
+    
+    # مصدر NASDAQ الرسمي
     try:
-        logger.info("🔄 Fetching from SEC EDGAR...")
-        sec_url = "https://www.sec.gov/files/company_tickers.json"
-        sec_headers = {'User-Agent': 'ManusBot contact@example.com'}
-        sec_resp = requests.get(sec_url, headers=sec_headers, timeout=20)
-        if sec_resp.status_code == 200:
-            sec_data = sec_resp.json()
-            for v in sec_data.values():
-                t = v.get("ticker")
-                if t and str(t).isalpha() and 1 <= len(str(t)) <= 5:
-                    all_tickers.add(t.upper())
+        url = "https://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+        if resp.status_code == 200:
+            for line in resp.text.split('\n')[1:]:
+                if '|' in line:
+                    symbol = line.split('|')[0].strip()
+                    if symbol and symbol.isalpha() and 2 <= len(symbol) <= 5:
+                        tickers.add(symbol)
     except Exception as e:
-        logger.warning(f"SEC EDGAR failed: {e}")
-
-    # ===== المصدر الثاني: GitHub (قوائم متنوعة لضمان التغطية) =====
-    ticker_sources = [
-        "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/nasdaq/nasdaq_tickers.txt",
-        "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/nyse/nyse_tickers.txt",
-        "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/amex/amex_tickers.txt",
-        "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
-    ]
+        logger.warning(f"NASDAQ fetch failed: {e}")
     
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    for url in ticker_sources:
-        try:
-            resp = requests.get(url, headers=headers, timeout=15)
-            if resp.status_code == 200:
-                lines = resp.text.split('\n')
-                for line in lines:
-                    t = line.strip().split(',')[0].strip()
-                    if t and t.isalpha() and 1 <= len(t) <= 5:
-                        all_tickers.add(t.upper())
-        except: continue
-
-    if len(all_tickers) > 100:
-        final_list = sorted(list(all_tickers))[:MAX_TICKERS_TO_SCAN]
+    # مصدر NYSE
+    try:
+        url = "https://ftp.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
+        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+        if resp.status_code == 200:
+            for line in resp.text.split('\n')[1:]:
+                parts = line.split('|')
+                if len(parts) > 1:
+                    symbol = parts[1].strip()
+                    if symbol and symbol.isalpha() and 2 <= len(symbol) <= 5:
+                        tickers.add(symbol)
+    except Exception as e:
+        logger.warning(f"NYSE fetch failed: {e}")
+    
+    if len(tickers) > 100:
+        final_list = sorted(list(tickers))[:MAX_TICKERS_TO_SCAN]
         with state_lock:
             state["tickers"] = final_list
-            state["last_ticker_update"] = datetime.now().isoformat()
             save_state()
         logger.info(f"✅ Universe updated: {len(final_list)} stocks")
-        send_telegram(f"📊 Universe Expanded: {len(final_list)} stocks (SEC + NASDAQ + NYSE + AMEX)")
-        return final_list
-    return list(state.get("tickers", []))
-
-    # ===== المصدر الثاني: GitHub (قائمة بديلة) =====
-    # قائمة بمصادر بديلة (أحدهما سيعمل) لضمان جلب الـ 3800 سهم على Railway
-def update_all_tickers():
-    global state
-    all_tickers = set()
-    
-    # ===== المصدر الأول: SEC EDGAR =====
-    try:
-        logger.info("🔄 Fetching from SEC EDGAR...")
-        sec_resp = requests.get("https://www.sec.gov/files/company_tickers.json", 
-                                headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
-        if sec_resp.status_code == 200:
-            for v in sec_resp.json().values():
-                t = v.get("ticker")
-                if t and t.isalpha() and 1 <= len(t) <= 5:
-                    all_tickers.add(t.upper())
-    except Exception as e:
-        logger.warning(f"SEC EDGAR failed: {e}")
-
-    # ===== المصدر الثاني: NASDAQ + NYSE =====
-    for url in [
-        "https://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
-        "https://ftp.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
-    ]:
-        try:
-            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
-            if resp.status_code == 200:
-                for line in resp.text.split('\n')[1:]:
-                    parts = line.split('|')
-                    if len(parts) > 0:
-                        t = parts[0].strip()
-                        if t and t.isalpha() and 1 <= len(t) <= 5:
-                            all_tickers.add(t.upper())
-        except:
-            pass
-
-    # ===== إذا نجحنا في جلب البيانات =====
-    if len(all_tickers) > 100:
-        final_list = sorted(list(all_tickers))[:MAX_TICKERS_TO_SCAN]
-        with state_lock:
-            state["tickers"] = final_list
-            state["last_ticker_update"] = datetime.now().isoformat()
-            save_state()
-        logger.info(f"✅ Universe updated: {len(final_list)} stocks")
-        send_telegram(f"📊 Universe: {len(final_list)} stocks ready")
         return final_list
     
-    # ===== إذا فشل كل شيء، قائمة احتياطية =====
-    backup = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX"]
+    # Backup: قائمة موسعة
+    backup = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX", "INTC", "PLTR", "SOFI", "NIO", "GME", "AMC"]
     with state_lock:
         state["tickers"] = backup
         save_state()

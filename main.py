@@ -646,47 +646,46 @@ def update_all_tickers():
     # ===== NASDAQ الرسمي =====
     try:
         url = "https://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
-        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
-        if resp.status_code == 200:
-            for line in resp.text.split('\n')[1:]:
-                if '|' in line:
-                    symbol = line.split('|')[0].strip()
-                    if symbol and symbol.isalpha() and 2 <= len(symbol) <= 5:
-                        tickers.add(symbol)
-            logger.info(f"✅ NASDAQ: {len(tickers)} tickers")
-    except Exception as e:
-        logger.warning(f"NASDAQ failed: {e}")
+def update_all_tickers():
+    global state
     
-    # ===== NYSE الرسمي =====
-    try:
-        url = "https://ftp.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
-        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
-        if resp.status_code == 200:
-            for line in resp.text.split('\n')[1:]:
-                parts = line.split('|')
-                if len(parts) > 1:
-                    symbol = parts[1].strip()
-                    if symbol and symbol.isalpha() and 2 <= len(symbol) <= 5:
-                        tickers.add(symbol)
-            logger.info(f"✅ NYSE: Added more tickers")
-    except Exception as e:
-        logger.warning(f"NYSE failed: {e}")
+    tickers = set()
     
-    # ===== إذا نجحنا =====
-    if len(tickers) > 200:
+    # ===== قائمة جاهزة من GitHub (موثوقة ومجربة) =====
+    sources = [
+        "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/nasdaq/nasdaq_tickers.txt",
+        "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/nyse/nyse_tickers.txt",
+        "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/amex/amex_tickers.txt",
+    ]
+    
+    for url in sources:
+        try:
+            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+            if resp.status_code == 200:
+                for line in resp.text.split('\n'):
+                    sym = line.strip().upper()
+                    if sym and sym.isalpha() and 2 <= len(sym) <= 5:
+                        tickers.add(sym)
+                logger.info(f"✅ Loaded from {url.split('/')[-1]}")
+        except Exception as e:
+            logger.warning(f"Failed {url}: {e}")
+    
+    if len(tickers) > 1000:
         final_list = sorted(list(tickers))[:MAX_TICKERS_TO_SCAN]
         with state_lock:
             state["tickers"] = final_list
-            state["last_ticker_update"] = datetime.now().isoformat()
             save_state()
         logger.info(f"✅ Universe updated: {len(final_list)} stocks")
-        send_telegram(f"📊 Universe: {len(final_list)} stocks ready")
         return final_list
     
-    # ===== Backup: قائمة يدوية موسعة =====
-    backup = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX",
-              "INTC", "PLTR", "SOFI", "NIO", "GME", "AMC", "RIOT", "MARA", "COIN",
-              "MSTR", "ROKU", "PYPL", "UBER", "SNAP", "ZM", "BA", "DIS", "JPM"]
+    # Backup نهائي: قائمة كبيرة تشمل أشهر الأسهم
+    backup = [
+        "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX",
+        "INTC", "PLTR", "SOFI", "NIO", "GME", "AMC", "RIOT", "MARA", "COIN",
+        "MSTR", "ROKU", "PYPL", "UBER", "SNAP", "ZM", "BA", "DIS", "JPM", "WMT",
+        "KO", "PEP", "MCD", "NKE", "SBUX", "T", "VZ", "SPCE", "RBLX", "U",
+        "DASH", "ABNB", "CRWD", "PANW", "SNOW", "DOCU", "TEAM", "NET", "HOOD", "DKNG"
+    ]
     with state_lock:
         state["tickers"] = backup
         save_state()

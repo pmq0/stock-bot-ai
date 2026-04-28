@@ -3639,7 +3639,7 @@ if __name__ == "__main__":
     threading.Thread(target=premarket_gapper_scanner, daemon=True).start()
     threading.Thread(target=fetch_news_catalyst,      daemon=True).start()
     threading.Thread(target=scan_vshape_opportunities, daemon=True).start()
-    threading.Thread(target=rvol_spike_scanner,       daemon=True).start()
+    # threading.Thread(target=rvol_spike_scanner,       daemon=True).start()   # معطل
     threading.Thread(target=power_runner_scanner,     daemon=True).start()  # 🚀 HTCO-style runners
     threading.Thread(target=elite_3_summary_loop,     daemon=True).start()
     threading.Thread(target=daily_report_scheduler,   daemon=True).start()

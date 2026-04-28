@@ -148,9 +148,9 @@ def fast_filter(symbol):
         
 # ================= MARKET PHASE SETTINGS =================
 PHASE_SETTINGS = {
-    "PRE":     {"min_score": 85,  "size_multiplier": 0.5, "vol_surge_mult": 1.5, "description": "🟡 Pre-Market"},
-    "REGULAR": {"min_score": 85,  "size_multiplier": 1.0, "vol_surge_mult": 1.2, "description": "🟢 Regular Hours"},
-    "AFTER":   {"min_score": 90,  "size_multiplier": 0.3, "vol_surge_mult": 2.0, "description": "🔵 After-Hours"},
+    "PRE":     {"min_score": 90,  "size_multiplier": 0.5, "vol_surge_mult": 1.5, "description": "🟡 Pre-Market"},
+    "REGULAR": {"min_score": 90,  "size_multiplier": 1.0, "vol_surge_mult": 1.2, "description": "🟢 Regular Hours"},
+    "AFTER":   {"min_score": 95,  "size_multiplier": 0.3, "vol_surge_mult": 2.0, "description": "🔵 After-Hours"},
     "CLOSED":  {"min_score": 999, "size_multiplier": 0,   "vol_surge_mult": 0,   "description": "⚫ Market Closed"}
 }
 

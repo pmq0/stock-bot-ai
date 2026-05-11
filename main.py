@@ -3918,6 +3918,9 @@ if __name__ == "__main__":
     load_state()
     ensure_state_schema()
 
+    # ===== IMPORTANT: Load tickers FIRST =====
+    update_all_tickers()  # <--- أضف هذا السطر هنا
+    
     # أساسيات (إلزامية)
     threading.Thread(target=background_monitor, daemon=True).start()
     threading.Thread(target=cleaner_loop, daemon=True).start()
@@ -3943,12 +3946,11 @@ if __name__ == "__main__":
     
     logger.info("=" * 50)
     logger.info("🚀 PENNY HUNTER BOT STARTED!")
-    logger.info(f"📊 Target: $0.3 - $20 penny stocks")
+    logger.info("📊 Target: $0.3 - $20 penny stocks")
     logger.info("=" * 50)
     
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
-
 # ================= CACHED DATA FETCHER =================
 
 

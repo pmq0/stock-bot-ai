@@ -3918,30 +3918,25 @@ if __name__ == "__main__":
     load_state()
     ensure_state_schema()
 
-    # الأساسيات (إلزامي لعمل البوت)
-    threading.Thread(target=background_monitor,       daemon=True).start()
-    threading.Thread(target=cleaner_loop,             daemon=True).start()
-    threading.Thread(target=cache_cleaner_loop,       daemon=True).start()
+    # أساسيات (إلزامية)
+    threading.Thread(target=background_monitor, daemon=True).start()
+    threading.Thread(target=cleaner_loop, daemon=True).start()
+    threading.Thread(target=cache_cleaner_loop, daemon=True).start()
 
-    # صيد البيني ستوكس (أولوية قصوى - نسخة DeepSeek المحسنة)
+    # 🔥 ماسحات صيد البيني (كلها شغالة)
     threading.Thread(target=ultra_fast_penny_scanner, daemon=True).start()
-    threading.Thread(target=penny_gap_scanner,        daemon=True).start()
+    threading.Thread(target=penny_gap_scanner, daemon=True).start()
+    threading.Thread(target=rvol_spike_scanner, daemon=True).start()
+    threading.Thread(target=power_runner_scanner, daemon=True).start()
+    threading.Thread(target=fast_momentum_scanner, daemon=True).start()
     
-    # الأخبار والذكاء الاصطناعي (مهم للمحفزات)
-    threading.Thread(target=rss_news_scanner,         daemon=True).start()
-    threading.Thread(target=fetch_news_catalyst,      daemon=True).start()
+    # أخبار RSS (مفيدة للمحفزات)
+    threading.Thread(target=rss_news_scanner, daemon=True).start()
+    threading.Thread(target=fetch_news_catalyst, daemon=True).start()
     
-    # ماسحات ثانوية (تم تعطيلها لتوفير الذاكرة والمعالج على Railway)
-    # threading.Thread(target=background_scanner,       daemon=True).start()
-    # threading.Thread(target=rvol_spike_scanner,       daemon=True).start()
-    # threading.Thread(target=power_runner_scanner,     daemon=True).start()
-    # threading.Thread(target=post_halt_entry_monitor,  daemon=True).start()
-    # threading.Thread(target=premarket_gap_scanner,    daemon=True).start()
-    # threading.Thread(target=premarket_gapper_scanner, daemon=True).start()
-    
-    # التقارير والملخصات
-    threading.Thread(target=elite_3_summary_loop,     daemon=True).start()
-    threading.Thread(target=daily_report_scheduler,   daemon=True).start()
+    # تقارير
+    threading.Thread(target=elite_3_summary_loop, daemon=True).start()
+    threading.Thread(target=daily_report_scheduler, daemon=True).start()
 
     if bot:
         threading.Thread(target=run_telegram_bot, daemon=True).start()

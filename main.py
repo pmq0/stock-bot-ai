@@ -5582,7 +5582,7 @@ if __name__ == "__main__":
     threading.Thread(target=fast_momentum_scanner, daemon=True).start()
     threading.Thread(target=support_resistance_scanner, daemon=True).start()
     threading.Thread(target=halt_breaker_scanner, daemon=True).start()  # 💣 صيد الهالتات القوية مثل SUGP
-    threading.Thread(target=strong_news_scanner, daemon=True).start()  # 📰 صيد الأخبار القوية
+    threading.Thread(target=rss_news_scanner, daemon=True).start()  # صيد الأخبار القوية
     
     # أخبار RSS (مفيدة للمحفزات)
     # 📰 أخبار RSS والمحفزات (مفعلة الآن!)

@@ -84,7 +84,7 @@ SCAN_INTERVAL_SEC = 900  # 15 دقيقة
 BREAK_BETWEEN_CHUNKS = 5
 DEEP_ANALYSIS_WORKERS = 4
 SIGNAL_COOLDOWN = 3600
-MAX_DAILY_SIGNALS = 20        # الحد الأقصى للرسائل يومياً (لتجنب الإزعاج)
+MAX_DAILY_SIGNALS = 80        # الحد الأقصى للرسائل يومياً (لتجنب الإزعاج)
 
 # Fast Momentum Scanner Settings
 MOMENTUM_SCAN_INTERVAL = 120

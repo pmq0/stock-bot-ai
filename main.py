@@ -112,7 +112,7 @@ MAX_DAILY_SIGNALS = 150       # رُفع من 50 لأيام الحركة الق�
 AI_PROCESS_ENABLED = True
 AI_CONFIDENCE_THRESHOLD = 70
 AI_MAX_ANALYSIS_PER_MINUTE = 10
-AI_MODEL = "llama3-8b-8192"  # نموذج مجاني متاح
+AI_MODEL = "llama-3.3-70b-versatile"  # نموذج مجاني متاح
 AI_SCANNER_INTERVAL = 300
 AI_MAX_CANDIDATES = 5
 

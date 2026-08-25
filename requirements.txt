@@ -13,3 +13,8 @@ deep-translator==1.11.4
 groq
 finnhub-python
 psutil
+google-generativeai>=0.7.0
+mistralai>=0.4.0
+vaderSentiment>=3.3.2
+pandas-ta>=0.3.14b0
+python-dotenv>=1.0.0

@@ -1,5 +1,5 @@
 pyTelegramBotAPI==4.15.0
-flask==3.0.0
+Flask==3.0.0
 pandas==2.1.4
 numpy==1.24.3
 pytz==2023.3
@@ -13,7 +13,6 @@ deep-translator==1.11.4
 groq
 finnhub-python
 psutil
-google-generativeai>=0.7.0
 mistralai>=0.4.0
 vaderSentiment>=3.3.2
-python-dotenv>=1.0.0
+google-genai>=1.0.0

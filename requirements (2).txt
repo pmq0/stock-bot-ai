@@ -1,0 +1,20 @@
+# Runtime dependencies for Penny Hunter (paper trading only)
+beautifulsoup4
+curl-cffi
+deep-translator
+feedparser
+finnhub-python
+Flask
+matplotlib
+numpy
+openai
+pandas
+pandas-market-calendars
+pandas-ta-classic==0.8.32
+psutil
+pyTelegramBotAPI
+pytz
+scikit-learn
+tenacity
+websocket-client
+yfinance

@@ -1,10 +1,16 @@
-# Runtime dependencies for Penny Hunter (paper trading only)
+# Runtime dependencies for Penny Hunter
+# Paper trading only
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 beautifulsoup4
 curl-cffi
 deep-translator
 feedparser
 finnhub-python
 Flask
+google-genai
+groq
+gymnasium>=0.29,<1.2
 matplotlib
 numpy
 openai
@@ -15,6 +21,9 @@ psutil
 pyTelegramBotAPI
 pytz
 scikit-learn
+scipy
+stable-baselines3==2.7.0
 tenacity
+torch==2.7.1+cpu
 websocket-client
 yfinance

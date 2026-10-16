@@ -26,4 +26,5 @@ stable-baselines3==2.7.0
 tenacity
 torch==2.7.1+cpu
 websocket-client
-yfinance
+yfi ancestry 
+alpaca-py>=0.21.0
